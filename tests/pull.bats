@@ -144,3 +144,12 @@ teardown() {
     run jq -r '.repo.default_branch, (.branch_protection | keys[])' "${CONFIG}"
     assert_output "2026_06_05_k8s"$'\n'"2026_06_05_k8s"
 }
+
+@test "pull: a label without a description is written with an empty one" {
+    set_api GET /repos/:owner/:repo/labels '[{"name":"autorelease: pending","color":"ededed","description":null}]'
+
+    run ./gh-repo-config pull --config "${CONFIG}"
+    assert_success
+    run jq -c '.labels' "${CONFIG}"
+    assert_output '[{"name":"autorelease: pending","color":"ededed","description":""}]'
+}

@@ -226,7 +226,7 @@ app::pull() {
     repo_json=$(printf '%s' "${repo_info}" | app::repo_get_to_patch)
     topics_json=$("${_GH}" api /repos/:owner/:repo/topics | jq '{names}')
     labels_json=$("${_GH}" api /repos/:owner/:repo/labels --paginate | \
-        jq -s 'add // [] | [.[] | {name, color, description}]')
+        jq -s 'add // [] | [.[] | {name, color, description: (.description // "")}]')
 
     # Branch protection and rulesets are unavailable on private repos (free plan);
     # the sections are left out so push and sync leave them alone.
