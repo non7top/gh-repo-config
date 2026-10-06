@@ -260,3 +260,26 @@ EOF
     assert_line '-      "color": "d73a4a",'
     assert_line '+      "color": "ffffff",'
 }
+
+@test "push: ~DEFAULT_BRANCH follows a default branch change made in the same push" {
+    config_with '"repo", "branch_protection"'
+    jq '.repo.default_branch = "other"' "${CONFIG}" >"${CONFIG}.new" && mv "${CONFIG}.new" "${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}" --allow-default-branch-change
+    assert_success
+
+    run gh_calls
+    assert_line --regexp '^PUT /repos/:owner/:repo/branches/other/protection '
+    refute_output --partial "/branches/main/protection"
+}
+
+@test "push: ~DEFAULT_BRANCH stays on the live default branch when the change is refused" {
+    config_with '"repo", "branch_protection"'
+    jq '.repo.default_branch = "other"' "${CONFIG}" >"${CONFIG}.new" && mv "${CONFIG}.new" "${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}"
+    assert_success
+
+    run gh_calls
+    assert_line --regexp '^PUT /repos/:owner/:repo/branches/main/protection '
+}

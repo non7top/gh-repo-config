@@ -571,9 +571,16 @@ app::push() {
     repo_meta=$("${_GH}" api /repos/:owner/:repo --jq '.default_branch + " " + (.private | tostring)')
     read -r live_default_branch repo_private <<<"${repo_meta}"
 
+    # Where ~DEFAULT_BRANCH points once the repo section has been applied.
+    local default_after_push="${live_default_branch}" wanted_default_branch
+    wanted_default_branch=$(jq -r '.repo.default_branch // empty' "${APP_CONFIG}")
+    if [ -n "${wanted_default_branch}" ] && [ "${APP_ALLOW_DEFAULT_BRANCH_CHANGE}" = "true" ]; then
+        default_after_push="${wanted_default_branch}"
+    fi
+
     local plan=""
     if [ "${prune}" = "true" ]; then
-        plan=$(app::prune_plan "${repo_private}" "${live_default_branch}")
+        plan=$(app::prune_plan "${repo_private}" "${default_after_push}")
         if [ -n "${plan}" ]; then
             log "The following live resources are not in ${APP_CONFIG} and will be deleted:"
             while IFS=$'\t' read -r _ description; do
@@ -589,7 +596,7 @@ app::push() {
     if [ "${APP_DRY_RUN}" = "true" ]; then
         local live_doc desired_doc
         live_doc=$(app::live_doc)
-        desired_doc=$(app::desired_doc "${live_doc}" "${live_default_branch}" "${repo_private}" "${prune}")
+        desired_doc=$(app::desired_doc "${live_doc}" "${default_after_push}" "${repo_private}" "${prune}")
         app::show_diff "${live_doc}" "${desired_doc}"
     fi
 
@@ -626,7 +633,7 @@ app::push() {
                 [ -n "${key}" ] || continue
                 branch="${key}"
                 if [ "${key}" = "~DEFAULT_BRANCH" ]; then
-                    branch="${live_default_branch}"
+                    branch="${default_after_push}"
                 fi
                 log:api "${repo}" "Configuring branch protection rules for '${branch}'"
                 app::write PUT "/repos/:owner/:repo/branches/${branch}/protection" \
