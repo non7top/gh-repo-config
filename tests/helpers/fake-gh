@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fake `gh` for tests.
+# GET requests are served from $FAKE_GH_FIXTURES, keyed by method and path:
+#   GET /repos/:owner/:repo/labels  ->  GET__repos__owner__repo__labels.json
+# A missing file is a 404 (exit 1). Mutating requests are appended to
+# $FAKE_GH_LOG as "METHOD path BODY" and answered from the same directory if a
+# fixture exists (otherwise with nothing).
+set -o nounset -o pipefail
+
+if [ "$1" = "repo" ]; then
+    echo "someuser/somerepo"
+    exit 0
+fi
+
+shift
+method="GET"
+path=""
+input=""
+jq_expr=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -X)
+        method="$2"
+        shift 2
+        ;;
+    --input=*)
+        input="${1#--input=}"
+        shift
+        ;;
+    --jq)
+        jq_expr="$2"
+        shift 2
+        ;;
+    --paginate)
+        shift
+        ;;
+    *)
+        path="$1"
+        shift
+        ;;
+    esac
+done
+
+key="${path%%\?*}"
+key="${key#/}"
+key="${key//:/}"
+key="${key//\//__}"
+file="${FAKE_GH_FIXTURES}/${method}__${key}.json"
+
+if [ "${method}" != "GET" ]; then
+    body=""
+    if [ "${input}" = "-" ]; then
+        body=$(cat)
+    elif [ -n "${input}" ]; then
+        body=$(cat "${input}")
+    fi
+    printf '%s %s %s\n' "${method}" "${path}" "$(printf '%s' "${body}" | jq -c . 2>/dev/null)" >>"${FAKE_GH_LOG}"
+    if [ -f "${file}" ]; then
+        cat "${file}"
+    fi
+    exit 0
+fi
+
+if [ ! -f "${file}" ]; then
+    echo '{"message":"Not Found"}' >&2
+    exit 1
+fi
+if [ -n "${jq_expr}" ]; then
+    jq -r "${jq_expr}" "${file}"
+else
+    cat "${file}"
+fi

@@ -3,12 +3,14 @@ set -o errexit -o errtrace -o nounset -o pipefail
 
 APP_NAME="$(basename "$0")"
 APP_VERSION="1.0.0"
-APP_CONFIG=".github/config"
+APP_CONFIG=".github/repo-config.json"
 APP_CMD="help"
 APP_ALLOW_DEFAULT_BRANCH_CHANGE="false"
+APP_DRY_RUN="false"
+APP_YES="false"
 
 # `APP_ENV` is set by `make test`.
-# `_GH` allows us to mock the `gh` binary in tests (see apply.bats).
+# `_GH` allows us to mock the `gh` binary in tests.
 APP_ENV="${APP_ENV:-}"
 if [ "${APP_ENV}" == "test" ]; then
     _GH="${_GH:-false}"
@@ -29,12 +31,7 @@ log() {
 log:action() {
     local -r action="$1"
     local -r msg="$2"
-    if [ $# -gt 2 ]; then
-        local -r eol="$3"
-    else
-        local -r eol="\n"
-    fi
-    printf "[%8s]: %s%b" "${action}" "${msg}" "${eol}" >/dev/stderr
+    printf "[%8s]: %s\n" "${action}" "${msg}" >/dev/stderr
 }
 
 log:api() {
@@ -43,137 +40,19 @@ log:api() {
     printf "[%s]: %s\n" "${repo}" "${msg}" >/dev/stderr
 }
 
-app::apply() {
-    local repo
-    repo=$("${_GH}" repo view --json nameWithOwner --jq .nameWithOwner)
-
-    # Fetch live default branch (used for default_branch change guard and
-    # resolving branch-protection/default.json to the actual branch name)
-    local repo_meta live_default_branch repo_private
-    repo_meta=$("${_GH}" api /repos/:owner/:repo --jq '.default_branch + " " + (.private | tostring)')
-    read -r live_default_branch repo_private <<<"${repo_meta}"
-
-    if [ -f "${APP_CONFIG}/repo.json" ]; then
-        log:api "${repo}" "Configuring repo"
-
-        local config_default_branch
-        config_default_branch=$(jq -r '.default_branch // empty' "${APP_CONFIG}/repo.json")
-
-        if [ -n "${config_default_branch}" ] && [ "${config_default_branch}" != "${live_default_branch}" ]; then
-            if [ "${APP_ALLOW_DEFAULT_BRANCH_CHANGE}" != "true" ]; then
-                log "ERROR: default_branch in repo.json ('${config_default_branch}') differs from live ('${live_default_branch}')."
-                log "  Refusing to change default branch without explicit opt-in."
-                log "  Run with --allow-default-branch-change to allow this change."
-                log "  Applying remaining repo.json fields without default_branch."
-                jq 'del(.default_branch)' "${APP_CONFIG}/repo.json" | \
-                    "${_GH}" api -X PATCH /repos/:owner/:repo --input=- >/dev/null
-            else
-                log:api "${repo}" "Changing default branch: '${live_default_branch}' -> '${config_default_branch}'"
-                "${_GH}" api -X PATCH /repos/:owner/:repo \
-                    --input="${APP_CONFIG}/repo.json" >/dev/null
-            fi
-        else
-            "${_GH}" api -X PATCH /repos/:owner/:repo \
-                --input="${APP_CONFIG}/repo.json" >/dev/null
-        fi
+# Send a mutating request. Body (optional) is JSON on stdin of `gh api`.
+app::write() {
+    local -r method="$1"
+    local -r path="$2"
+    local -r body="${3:-}"
+    if [ "${APP_DRY_RUN}" = "true" ]; then
+        log:action "dry-run" "${method} ${path}"
+        return 0
     fi
-
-    if [ -f "${APP_CONFIG}/topics.json" ]; then
-        log:api "${repo}" "Configuring repo topics"
-        "${_GH}" api -X PUT /repos/:owner/:repo/topics \
-            --input="${APP_CONFIG}/topics.json" >/dev/null
-    fi
-
-    if [ -d "${APP_CONFIG}/branch-protection" ]; then
-        if [ "${repo_private}" = "true" ]; then
-            log:action "warn" "Skipping branch protection: unavailable on private repos"
-        else
-            for filepath in "${APP_CONFIG}/branch-protection/"*.json; do
-                [ -f "${filepath}" ] || continue
-                local branch
-                branch=$(basename "${filepath}" ".json")
-                if [ "${branch}" = "default" ]; then
-                    branch="${live_default_branch}"
-                fi
-                log:api "${repo}" "Configuring branch protection rules for '${branch}'"
-                "${_GH}" api -X PUT "/repos/:owner/:repo/branches/${branch}/protection" \
-                    --input="${filepath}" >/dev/null
-            done
-        fi
-    fi
-
-    if [ -f "${APP_CONFIG}/labels.json" ]; then
-        log:api "${repo}" "Configuring labels"
-        while IFS= read -r label_json; do
-            local label_name encoded_name
-            label_name=$(printf '%s' "${label_json}" | jq -r '.name')
-            encoded_name=$(printf '%s' "${label_name}" | jq -Rr '@uri')
-            if "${_GH}" api "/repos/:owner/:repo/labels/${encoded_name}" >/dev/null 2>&1; then
-                printf '%s' "${label_json}" | \
-                    "${_GH}" api -X PATCH "/repos/:owner/:repo/labels/${encoded_name}" \
-                    --input=- >/dev/null
-            else
-                printf '%s' "${label_json}" | \
-                    "${_GH}" api -X POST /repos/:owner/:repo/labels \
-                    --input=- >/dev/null
-            fi
-        done < <(jq -c '.[]' "${APP_CONFIG}/labels.json")
-    fi
-
-    if [ -d "${APP_CONFIG}/environments" ]; then
-        for filepath in "${APP_CONFIG}/environments/"*.json; do
-            [ -f "${filepath}" ] || continue
-            local env_name
-            env_name=$(basename "${filepath}" ".json")
-            log:api "${repo}" "Configuring environment '${env_name}'"
-            "${_GH}" api -X PUT "/repos/:owner/:repo/environments/${env_name}" \
-                --input="${filepath}" >/dev/null
-        done
-    fi
-
-    if [ -d "${APP_CONFIG}/rulesets" ]; then
-        if [ "${repo_private}" = "true" ]; then
-            log:action "warn" "Skipping rulesets: unavailable on private repos"
-        else
-            local existing_rulesets
-            existing_rulesets=$("${_GH}" api "/repos/:owner/:repo/rulesets?includes_parents=false")
-            for filepath in "${APP_CONFIG}/rulesets/"*.json; do
-                [ -f "${filepath}" ] || continue
-                local ruleset_name ruleset_id
-                ruleset_name=$(jq -r '.name' "${filepath}")
-                ruleset_id=$(printf '%s' "${existing_rulesets}" | \
-                    jq -r --arg name "${ruleset_name}" 'first(.[] | select(.name == $name) | .id) // empty')
-                log:api "${repo}" "Configuring ruleset '${ruleset_name}'"
-                if [ -n "${ruleset_id}" ]; then
-                    "${_GH}" api -X PUT "/repos/:owner/:repo/rulesets/${ruleset_id}" \
-                        --input="${filepath}" >/dev/null
-                else
-                    "${_GH}" api -X POST /repos/:owner/:repo/rulesets \
-                        --input="${filepath}" >/dev/null
-                fi
-            done
-        fi
-    fi
-
-    if [ -f "${APP_CONFIG}/actions.json" ]; then
-        log:api "${repo}" "Configuring Actions permissions"
-        if jq -e '.permissions' "${APP_CONFIG}/actions.json" >/dev/null; then
-            jq -c '.permissions' "${APP_CONFIG}/actions.json" | \
-                "${_GH}" api -X PUT /repos/:owner/:repo/actions/permissions --input=- >/dev/null
-        fi
-        if jq -e '.workflow' "${APP_CONFIG}/actions.json" >/dev/null; then
-            jq -c '.workflow' "${APP_CONFIG}/actions.json" | \
-                "${_GH}" api -X PUT /repos/:owner/:repo/actions/permissions/workflow --input=- >/dev/null
-        fi
-    fi
-
-    if [ -f "${APP_CONFIG}/security.json" ]; then
-        log:api "${repo}" "Configuring vulnerability alerts"
-        if [ "$(jq -r '.vulnerability_alerts' "${APP_CONFIG}/security.json")" = "true" ]; then
-            "${_GH}" api -X PUT /repos/:owner/:repo/vulnerability-alerts >/dev/null
-        else
-            "${_GH}" api -X DELETE /repos/:owner/:repo/vulnerability-alerts >/dev/null
-        fi
+    if [ -n "${body}" ]; then
+        printf '%s' "${body}" | "${_GH}" api -X "${method}" "${path}" --input=- >/dev/null
+    else
+        "${_GH}" api -X "${method}" "${path}" >/dev/null
     fi
 }
 
@@ -189,27 +68,55 @@ app::confirm() {
     done
 }
 
+app::uri() {
+    printf '%s' "$1" | jq -Rr '@uri'
+}
+
+app::require_config() {
+    if [ ! -f "${APP_CONFIG}" ]; then
+        log "Error: config file '${APP_CONFIG}' not found. Run '${APP_NAME} pull' to create it."
+        exit 1
+    fi
+    if ! jq -e 'type == "object"' "${APP_CONFIG}" >/dev/null 2>&1; then
+        log "Error: '${APP_CONFIG}' is not a valid JSON object."
+        exit 1
+    fi
+}
+
+# Is the named top-level section present in the config file?
+app::has() {
+    jq -e --arg key "$1" 'has($key)' "${APP_CONFIG}" >/dev/null
+}
+
+app::cfg() {
+    jq -c "$1" "${APP_CONFIG}"
+}
+
 app::help() {
-    echo "Manage GitHub repository settings via declarative configuration."
+    echo "Manage GitHub repository settings via a declarative config file."
     echo ""
     echo "Usage:"
     echo "  gh repo-config <command> [<flags>]"
     echo ""
     echo "Commands:"
-    echo "  apply:      Apply config"
-    echo "  init:       Initialize a config directory"
+    echo "  pull:       Write the repo's live settings to the config file"
+    echo "  push:       Apply the config file to the repo"
+    echo "  sync:       Like push, but also delete labels, rulesets, environments and"
+    echo "              branch protection that are not in the config file"
     echo ""
     echo "Examples:"
-    echo "  $ gh repo-config init"
-    echo "  $ gh repo-config apply"
+    echo "  $ gh repo-config pull"
+    echo "  $ gh repo-config push --dry-run"
+    echo "  $ gh repo-config sync"
     echo ""
-    echo "  # Specifying an alternate config directory:"
-    echo "  $ gh repo-config init --config ./repo-settings"
-    echo "  $ gh repo-config apply --config ./repo-settings"
+    echo "  # Specifying an alternate config file:"
+    echo "  $ gh repo-config pull --config ./repo-settings.json"
     echo ""
     echo "Options:"
-    echo "  -c, --config <dir>             Config directory [default: ${APP_CONFIG}]."
-    echo "  --allow-default-branch-change  Allow apply to change the repo's default branch."
+    echo "  -c, --config <file>            Config file [default: ${APP_CONFIG}]."
+    echo "  --allow-default-branch-change  Allow push to change the repo's default branch."
+    echo "  --dry-run                      Print changes instead of making them."
+    echo "  -y, --yes                      Do not ask for confirmation."
     echo "  -h, --help                     Show usage."
     echo "  -v, --version                  Show version."
     echo ""
@@ -273,20 +180,9 @@ app::ruleset_get_to_put() {
     jq '{name, target, enforcement, bypass_actors, conditions, rules} | with_entries(select(.value != null))'
 }
 
-app::init() {
-    log "Initializing config..."
-
-    # Fetch live repo info (includes default_branch)
-    local repo_info
-    repo_info=$("${_GH}" api /repos/:owner/:repo)
-    local default_branch
-    default_branch=$(printf '%s' "${repo_info}" | jq -r '.default_branch')
-
-    app::init_dir "${APP_CONFIG}"
-
-    # Generate repo.json: filter GET response to writable fields only
-    local repo_json
-    repo_json=$(printf '%s' "${repo_info}" | jq '{
+# Keep only the writable fields of GET /repos/{owner}/{repo} (PATCH body).
+app::repo_get_to_patch() {
+    jq '{
         allow_auto_merge,
         allow_merge_commit,
         allow_rebase_merge,
@@ -315,74 +211,67 @@ app::init() {
         squash_merge_commit_message,
         squash_merge_commit_title,
         web_commit_signoff_required
-    } | with_entries(select(.value != null))')
-    app::init_file "${APP_CONFIG}/repo.json" "${repo_json}"
+    } | with_entries(select(.value != null))'
+}
 
-    # Generate topics.json: GET response shape matches PUT body exactly
-    local topics_json
-    topics_json=$("${_GH}" api /repos/:owner/:repo/topics)
-    app::init_file "${APP_CONFIG}/topics.json" "${topics_json}"
+app::pull() {
+    log "Pulling settings..."
 
-    # Generate branch-protection/default.json from the live default branch.
-    # "default" is a special filename resolved at apply time — it doesn't hardcode
-    # the branch name, so it survives branch renames.
-    local repo_private
+    local repo_info default_branch repo_private
+    repo_info=$("${_GH}" api /repos/:owner/:repo)
+    default_branch=$(printf '%s' "${repo_info}" | jq -r '.default_branch')
     repo_private=$(printf '%s' "${repo_info}" | jq -r '.private')
+
+    local repo_json topics_json labels_json
+    repo_json=$(printf '%s' "${repo_info}" | app::repo_get_to_patch)
+    topics_json=$("${_GH}" api /repos/:owner/:repo/topics | jq '{names}')
+    labels_json=$("${_GH}" api /repos/:owner/:repo/labels --paginate | \
+        jq -s 'add // [] | [.[] | {name, color, description}]')
+
+    # Branch protection and rulesets are unavailable on private repos (free plan);
+    # the sections are left out so push and sync leave them alone.
+    local bp_json="null" rulesets_json="null"
     if [ "${repo_private}" = "true" ]; then
         log:action "warn" "Skipping branch protection and rulesets: unavailable on private repos"
     else
-        app::init_dir "${APP_CONFIG}/branch-protection"
-        local bp_raw
-        if bp_raw=$("${_GH}" api "/repos/:owner/:repo/branches/${default_branch}/protection" 2>/dev/null); then
-            local bp_json
-            bp_json=$(printf '%s' "${bp_raw}" | app::bp_get_to_put)
-            app::init_file "${APP_CONFIG}/branch-protection/default.json" "${bp_json}"
-        else
-            log:action "warn" "No branch protection rules found for '${default_branch}' — skipping"
-        fi
-    fi
+        bp_json="{}"
+        local branch
+        while IFS= read -r branch; do
+            [ -n "${branch}" ] || continue
+            local bp_raw
+            if bp_raw=$("${_GH}" api "/repos/:owner/:repo/branches/${branch}/protection" 2>/dev/null); then
+                bp_json=$(jq --arg branch "${branch}" --argjson value "$(printf '%s' "${bp_raw}" | app::bp_get_to_put)" \
+                    '.[$branch] = $value' <<<"${bp_json}")
+            fi
+        done < <("${_GH}" api /repos/:owner/:repo/branches --paginate --jq '.[] | select(.protected) | .name')
 
-    # Generate labels.json: one array file, only writable fields
-    local labels_json
-    labels_json=$("${_GH}" api /repos/:owner/:repo/labels --paginate | \
-        jq -s 'add // [] | [.[] | {name, color, description}]')
-    app::init_file "${APP_CONFIG}/labels.json" "${labels_json}"
-
-    # Generate environments/*.json: one file per environment, writable fields only
-    app::init_dir "${APP_CONFIG}/environments"
-    local envs_response
-    if envs_response=$("${_GH}" api /repos/:owner/:repo/environments 2>/dev/null); then
-        local env_count
-        env_count=$(printf '%s' "${envs_response}" | jq '.total_count')
-        if [ "${env_count}" -gt 0 ]; then
-            while IFS= read -r env_name; do
-                local env_json
-                env_json=$(app::env_get_to_put "${env_name}" "${envs_response}")
-                app::init_file "${APP_CONFIG}/environments/${env_name}.json" "${env_json}"
-            done < <(printf '%s' "${envs_response}" | jq -r '.environments[].name')
-        fi
-    fi
-
-    if [ "${repo_private}" != "true" ]; then
-        local rulesets_list
+        rulesets_json="[]"
+        local rulesets_list ruleset_id
         rulesets_list=$("${_GH}" api "/repos/:owner/:repo/rulesets?includes_parents=false" 2>/dev/null) || rulesets_list=""
         while IFS= read -r ruleset_id; do
             [ -n "${ruleset_id}" ] || continue
-            local ruleset_raw ruleset_json ruleset_file
+            local ruleset_raw
             ruleset_raw=$("${_GH}" api "/repos/:owner/:repo/rulesets/${ruleset_id}")
-            ruleset_json=$(printf '%s' "${ruleset_raw}" | app::ruleset_get_to_put)
-            ruleset_file=$(printf '%s' "${ruleset_json}" | jq -r '.name | gsub("[^A-Za-z0-9._-]"; "-")')
-            app::init_dir "${APP_CONFIG}/rulesets"
-            app::init_file "${APP_CONFIG}/rulesets/${ruleset_file}.json" "${ruleset_json}"
+            rulesets_json=$(jq --argjson value "$(printf '%s' "${ruleset_raw}" | app::ruleset_get_to_put)" \
+                '. + [$value]' <<<"${rulesets_json}")
         done < <(printf '%s' "${rulesets_list}" | jq -r '.[].id // empty')
     fi
 
-    # Generate actions.json: workflow token defaults and allowed actions
-    local actions_perm actions_workflow
+    local environments_json="{}" envs_response=""
+    if envs_response=$("${_GH}" api /repos/:owner/:repo/environments 2>/dev/null); then
+        local env_name
+        while IFS= read -r env_name; do
+            [ -n "${env_name}" ] || continue
+            environments_json=$(jq --arg name "${env_name}" \
+                --argjson value "$(app::env_get_to_put "${env_name}" "${envs_response}")" \
+                '.[$name] = $value' <<<"${environments_json}")
+        done < <(printf '%s' "${envs_response}" | jq -r '.environments[].name')
+    fi
+
+    local actions_json="null" actions_perm actions_workflow
     actions_perm=$("${_GH}" api /repos/:owner/:repo/actions/permissions 2>/dev/null) || actions_perm=""
     actions_workflow=$("${_GH}" api /repos/:owner/:repo/actions/permissions/workflow 2>/dev/null) || actions_workflow=""
     if [ -n "${actions_perm}" ] && [ -n "${actions_workflow}" ]; then
-        local actions_json
         actions_json=$(jq -n --argjson perm "${actions_perm}" --argjson wf "${actions_workflow}" '{
             permissions: {enabled: $perm.enabled, allowed_actions: $perm.allowed_actions},
             workflow: {
@@ -390,44 +279,273 @@ app::init() {
                 can_approve_pull_request_reviews: $wf.can_approve_pull_request_reviews
             }
         } | del(..|nulls)')
-        app::init_file "${APP_CONFIG}/actions.json" "${actions_json}"
     fi
 
-    # Generate security.json: the vulnerability-alerts endpoint answers 204 or 404
+    # The vulnerability-alerts endpoint has no body: 204 means enabled, 404 disabled.
     local alerts_enabled="false"
     if "${_GH}" api /repos/:owner/:repo/vulnerability-alerts >/dev/null 2>&1; then
         alerts_enabled="true"
     fi
-    app::init_file "${APP_CONFIG}/security.json" "$(jq -n --argjson v "${alerts_enabled}" '{vulnerability_alerts: $v}')"
 
+    local doc
+    doc=$(jq -n \
+        --argjson repo "${repo_json}" \
+        --argjson topics "${topics_json}" \
+        --argjson branch_protection "${bp_json}" \
+        --argjson rulesets "${rulesets_json}" \
+        --argjson labels "${labels_json}" \
+        --argjson environments "${environments_json}" \
+        --argjson actions "${actions_json}" \
+        --argjson vulnerability_alerts "${alerts_enabled}" \
+        '{
+            repo: $repo,
+            topics: $topics,
+            branch_protection: $branch_protection,
+            rulesets: $rulesets,
+            labels: $labels,
+            environments: $environments,
+            actions: $actions,
+            vulnerability_alerts: $vulnerability_alerts
+        } | with_entries(select(.value != null))')
+
+    # Every section gets an "x-comment-<section>" sibling: user-written comments
+    # survive a pull, new ones default to the section's API docs link.
+    local old_comments="{}"
+    if [ -f "${APP_CONFIG}" ]; then
+        old_comments=$(jq -c 'with_entries(select(.key | startswith("x-comment-")))' "${APP_CONFIG}")
+    fi
+    doc=$(jq --argjson old "${old_comments}" '
+        {
+            repo: "https://docs.github.com/en/rest/repos/repos#update-a-repository",
+            topics: "https://docs.github.com/en/rest/repos/repos#replace-all-repository-topics",
+            branch_protection: "https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection",
+            rulesets: "https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset",
+            labels: "https://docs.github.com/en/rest/issues/labels",
+            environments: "https://docs.github.com/en/rest/deployments/environments#create-or-update-an-environment",
+            actions: "https://docs.github.com/en/rest/actions/permissions",
+            vulnerability_alerts: "https://docs.github.com/en/rest/repos/repos#enable-vulnerability-alerts"
+        } as $defaults
+        | . as $doc
+        | reduce ($doc | keys_unsorted[]) as $key ({};
+            ("x-comment-" + $key) as $ckey
+            | ($old[$ckey] // $defaults[$key]) as $comment
+            | (if $comment == null then . else .[$ckey] = $comment end)
+            | .[$key] = $doc[$key])' <<<"${doc}")
+
+    if [ -f "${APP_CONFIG}" ]; then
+        # The hunk header shows the nearest preceding x-comment, i.e. the changed section's comment.
+        if diff -u --show-function-line='^  "x-comment-' "${APP_CONFIG}" <(printf '%s\n' "${doc}") >/dev/stderr; then
+            log:action "keep" "${APP_CONFIG} (unchanged)"
+            return 0
+        fi
+        if [ "${APP_DRY_RUN}" = "true" ]; then
+            log:action "dry-run" "would replace ${APP_CONFIG}"
+            return 0
+        fi
+        if [ "${APP_YES}" != "true" ] && ! app::confirm "Overwrite ${APP_CONFIG}?"; then
+            log:action "keep" "${APP_CONFIG}"
+            return 0
+        fi
+        log:action "replace" "${APP_CONFIG}"
+    else
+        if [ "${APP_DRY_RUN}" = "true" ]; then
+            log:action "dry-run" "would create ${APP_CONFIG}"
+            return 0
+        fi
+        log:action "create" "${APP_CONFIG}"
+        mkdir -p "$(dirname "${APP_CONFIG}")"
+    fi
+    printf '%s\n' "${doc}" >"${APP_CONFIG}"
     log "Done"
 }
 
-app::init_dir() {
-    local -r path="$1"
-    if [ -d "${path}" ]; then
-        log:action "found" "${path}"
-    else
-        log:action "create" "${path}"
-        mkdir -p "${path}"
+# Print "<api path><TAB><description>" for everything live that the config file
+# manages (section present) but does not list.
+app::prune_plan() {
+    local -r repo_private="$1"
+
+    if app::has labels; then
+        local name
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            printf '/repos/:owner/:repo/labels/%s\tlabel %s\n' "$(app::uri "${name}")" "${name}"
+        done < <(comm -23 \
+            <("${_GH}" api /repos/:owner/:repo/labels --paginate --jq '.[].name' | sort) \
+            <(jq -r '.labels[].name' "${APP_CONFIG}" | sort))
+    fi
+
+    if [ "${repo_private}" != "true" ] && app::has rulesets; then
+        local rulesets_list ruleset_name
+        rulesets_list=$("${_GH}" api "/repos/:owner/:repo/rulesets?includes_parents=false")
+        while IFS=$'\t' read -r ruleset_id ruleset_name; do
+            [ -n "${ruleset_id}" ] || continue
+            if ! jq -e --arg name "${ruleset_name}" 'any(.rulesets[]; .name == $name)' "${APP_CONFIG}" >/dev/null; then
+                printf '/repos/:owner/:repo/rulesets/%s\truleset %s\n' "${ruleset_id}" "${ruleset_name}"
+            fi
+        done < <(printf '%s' "${rulesets_list}" | jq -r '.[] | [.id, .name] | @tsv')
+    fi
+
+    if app::has environments; then
+        local envs_response
+        envs_response=$("${_GH}" api /repos/:owner/:repo/environments)
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            if ! jq -e --arg name "${name}" '.environments | has($name)' "${APP_CONFIG}" >/dev/null; then
+                printf '/repos/:owner/:repo/environments/%s\tenvironment %s\n' "$(app::uri "${name}")" "${name}"
+            fi
+        done < <(printf '%s' "${envs_response}" | jq -r '.environments[].name')
+    fi
+
+    if [ "${repo_private}" != "true" ] && app::has branch_protection; then
+        while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            if ! jq -e --arg name "${name}" '.branch_protection | has($name)' "${APP_CONFIG}" >/dev/null; then
+                printf '/repos/:owner/:repo/branches/%s/protection\tbranch protection %s\n' "${name}" "${name}"
+            fi
+        done < <("${_GH}" api /repos/:owner/:repo/branches --paginate --jq '.[] | select(.protected) | .name')
     fi
 }
 
-app::init_file() {
-    local -r path="$1"
-    local -r content="$2"
-    if [ -f "${path}" ]; then
-        log:action "warn" "${path} already exists!"
-        if app::confirm "Overwrite?"; then
-            log:action "replace" "${path}"
-            printf '%s\n' "${content}" >"${path}"
-        else
-            log:action "keep" "${path}"
+app::push() {
+    local prune="${1:-false}"
+    app::require_config
+
+    local repo repo_meta live_default_branch repo_private
+    repo=$("${_GH}" repo view --json nameWithOwner --jq .nameWithOwner)
+    # Branch names can't contain spaces, so a space-separated pair is safe.
+    repo_meta=$("${_GH}" api /repos/:owner/:repo --jq '.default_branch + " " + (.private | tostring)')
+    read -r live_default_branch repo_private <<<"${repo_meta}"
+
+    local plan=""
+    if [ "${prune}" = "true" ]; then
+        plan=$(app::prune_plan "${repo_private}")
+        if [ -n "${plan}" ]; then
+            log "The following live resources are not in ${APP_CONFIG} and will be deleted:"
+            while IFS=$'\t' read -r _ description; do
+                log "  - ${description}"
+            done <<<"${plan}"
+            if [ "${APP_DRY_RUN}" != "true" ] && [ "${APP_YES}" != "true" ] && ! app::confirm "Delete these?"; then
+                log "Aborted."
+                return 1
+            fi
         fi
-    else
-        log:action "create" "${path}"
-        printf '%s\n' "${content}" >"${path}"
     fi
+
+    if app::has repo; then
+        log:api "${repo}" "Configuring repo"
+        local repo_body config_default_branch
+        repo_body=$(app::cfg '.repo')
+        config_default_branch=$(jq -r '.default_branch // empty' <<<"${repo_body}")
+        if [ -n "${config_default_branch}" ] && [ "${config_default_branch}" != "${live_default_branch}" ]; then
+            if [ "${APP_ALLOW_DEFAULT_BRANCH_CHANGE}" != "true" ]; then
+                log "ERROR: default_branch in repo ('${config_default_branch}') differs from live ('${live_default_branch}')."
+                log "  Refusing to change default branch without explicit opt-in."
+                log "  Run with --allow-default-branch-change to allow this change."
+                log "  Applying remaining repo fields without default_branch."
+                repo_body=$(jq -c 'del(.default_branch)' <<<"${repo_body}")
+            else
+                log:api "${repo}" "Changing default branch: '${live_default_branch}' -> '${config_default_branch}'"
+            fi
+        fi
+        app::write PATCH /repos/:owner/:repo "${repo_body}"
+    fi
+
+    if app::has topics; then
+        log:api "${repo}" "Configuring repo topics"
+        app::write PUT /repos/:owner/:repo/topics "$(app::cfg '.topics')"
+    fi
+
+    if app::has branch_protection; then
+        if [ "${repo_private}" = "true" ]; then
+            log:action "warn" "Skipping branch protection: unavailable on private repos"
+        else
+            local branch
+            while IFS= read -r branch; do
+                [ -n "${branch}" ] || continue
+                log:api "${repo}" "Configuring branch protection rules for '${branch}'"
+                app::write PUT "/repos/:owner/:repo/branches/${branch}/protection" \
+                    "$(jq -c --arg branch "${branch}" '.branch_protection[$branch]' "${APP_CONFIG}")"
+            done < <(jq -r '.branch_protection | keys[]' "${APP_CONFIG}")
+        fi
+    fi
+
+    if app::has rulesets; then
+        if [ "${repo_private}" = "true" ]; then
+            log:action "warn" "Skipping rulesets: unavailable on private repos"
+        else
+            local existing_rulesets index count
+            existing_rulesets=$("${_GH}" api "/repos/:owner/:repo/rulesets?includes_parents=false")
+            count=$(jq '.rulesets | length' "${APP_CONFIG}")
+            for ((index = 0; index < count; index++)); do
+                local ruleset_body ruleset_name ruleset_id
+                ruleset_body=$(jq -c --argjson i "${index}" '.rulesets[$i]' "${APP_CONFIG}")
+                ruleset_name=$(jq -r '.name' <<<"${ruleset_body}")
+                ruleset_id=$(printf '%s' "${existing_rulesets}" | \
+                    jq -r --arg name "${ruleset_name}" 'first(.[] | select(.name == $name) | .id) // empty')
+                log:api "${repo}" "Configuring ruleset '${ruleset_name}'"
+                if [ -n "${ruleset_id}" ]; then
+                    app::write PUT "/repos/:owner/:repo/rulesets/${ruleset_id}" "${ruleset_body}"
+                else
+                    app::write POST /repos/:owner/:repo/rulesets "${ruleset_body}"
+                fi
+            done
+        fi
+    fi
+
+    if app::has labels; then
+        log:api "${repo}" "Configuring labels"
+        local label_json label_name encoded_name
+        while IFS= read -r label_json; do
+            label_name=$(jq -r '.name' <<<"${label_json}")
+            encoded_name=$(app::uri "${label_name}")
+            if "${_GH}" api "/repos/:owner/:repo/labels/${encoded_name}" >/dev/null 2>&1; then
+                app::write PATCH "/repos/:owner/:repo/labels/${encoded_name}" "${label_json}"
+            else
+                app::write POST /repos/:owner/:repo/labels "${label_json}"
+            fi
+        done < <(jq -c '.labels[]' "${APP_CONFIG}")
+    fi
+
+    if app::has environments; then
+        local env_name
+        while IFS= read -r env_name; do
+            [ -n "${env_name}" ] || continue
+            log:api "${repo}" "Configuring environment '${env_name}'"
+            app::write PUT "/repos/:owner/:repo/environments/$(app::uri "${env_name}")" \
+                "$(jq -c --arg name "${env_name}" '.environments[$name]' "${APP_CONFIG}")"
+        done < <(jq -r '.environments | keys[]' "${APP_CONFIG}")
+    fi
+
+    if app::has actions; then
+        log:api "${repo}" "Configuring Actions permissions"
+        if jq -e '.actions | has("permissions")' "${APP_CONFIG}" >/dev/null; then
+            app::write PUT /repos/:owner/:repo/actions/permissions "$(app::cfg '.actions.permissions')"
+        fi
+        if jq -e '.actions | has("workflow")' "${APP_CONFIG}" >/dev/null; then
+            app::write PUT /repos/:owner/:repo/actions/permissions/workflow "$(app::cfg '.actions.workflow')"
+        fi
+    fi
+
+    if app::has vulnerability_alerts; then
+        log:api "${repo}" "Configuring vulnerability alerts"
+        if [ "$(jq -r '.vulnerability_alerts' "${APP_CONFIG}")" = "true" ]; then
+            app::write PUT /repos/:owner/:repo/vulnerability-alerts
+        else
+            app::write DELETE /repos/:owner/:repo/vulnerability-alerts
+        fi
+    fi
+
+    if [ -n "${plan}" ]; then
+        local path
+        while IFS=$'\t' read -r path description; do
+            log:api "${repo}" "Deleting ${description}"
+            app::write DELETE "${path}"
+        done <<<"${plan}"
+    fi
+}
+
+app::sync() {
+    app::push true
 }
 
 app::unknown() {
@@ -442,7 +560,7 @@ app::version() {
 app::parseargs() {
     while test $# -gt 0; do
         case "${1}" in
-        apply | help | init | version)
+        pull | push | sync | help | version)
             APP_CMD="${1}"
             shift
             ;;
@@ -452,6 +570,14 @@ app::parseargs() {
             ;;
         --allow-default-branch-change)
             APP_ALLOW_DEFAULT_BRANCH_CHANGE="true"
+            shift
+            ;;
+        --dry-run)
+            APP_DRY_RUN="true"
+            shift
+            ;;
+        -y | --yes)
+            APP_YES="true"
             shift
             ;;
         -h | --help)
@@ -472,9 +598,10 @@ app::parseargs() {
 
 app::dispatch() {
     case "${1}" in
-    apply) app::apply ;;
+    pull) app::pull ;;
+    push) app::push ;;
+    sync) app::sync ;;
     help) app::help ;;
-    init) app::init ;;
     version) app::version ;;
     esac
 }
