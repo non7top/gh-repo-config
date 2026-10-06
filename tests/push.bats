@@ -203,3 +203,12 @@ EOF
     assert_line "PUT /repos/:owner/:repo/topics $(jq -c '.topics' "${CONFIG}")"
     assert_line "PUT /repos/:owner/:repo/environments/production $(jq -c '.environments.production' "${CONFIG}")"
 }
+
+@test "push: keeps every log line when stderr is redirected to a file" {
+    run bash -c './gh-repo-config push --config "$1" --dry-run 2>"$2"' _ "${FULL_CONFIG}" "${BATS_TEST_TMPDIR}/stderr.log"
+    assert_success
+
+    run cat "${BATS_TEST_TMPDIR}/stderr.log"
+    assert_line "[someuser/somerepo]: Configuring repo"
+    assert_line "[someuser/somerepo]: Configuring vulnerability alerts"
+}

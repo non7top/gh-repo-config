@@ -25,19 +25,19 @@ fi
 
 log() {
     local -r msg="$1"
-    printf "%s\n" "${msg}" >/dev/stderr
+    printf "%s\n" "${msg}" >&2
 }
 
 log:action() {
     local -r action="$1"
     local -r msg="$2"
-    printf "[%8s]: %s\n" "${action}" "${msg}" >/dev/stderr
+    printf "[%8s]: %s\n" "${action}" "${msg}" >&2
 }
 
 log:api() {
     local -r repo="$1"
     local -r msg="$2"
-    printf "[%s]: %s\n" "${repo}" "${msg}" >/dev/stderr
+    printf "[%s]: %s\n" "${repo}" "${msg}" >&2
 }
 
 # Send a mutating request. Body (optional) is JSON on stdin of `gh api`.
@@ -423,7 +423,7 @@ app::pull() {
 
     if [ -f "${APP_CONFIG}" ]; then
         # The hunk header shows the nearest preceding x-comment, i.e. the changed section's comment.
-        if diff -u --show-function-line='^  "x-comment-' "${APP_CONFIG}" <(printf '%s\n' "${doc}") >/dev/stderr; then
+        if diff -u --show-function-line='^  "x-comment-' "${APP_CONFIG}" <(printf '%s\n' "${doc}") >&2; then
             log:action "keep" "${APP_CONFIG} (unchanged)"
             return 0
         fi
