@@ -1,0 +1,11 @@
+[
+  {
+    "id": 123,
+    "node_id": "abc123",
+    "url": "https://api.github.com/repos/testowner/gh-repo-config/labels/bug",
+    "name": "bug",
+    "color": "d73a4a",
+    "default": true,
+    "description": "Something isn't working"
+  }
+]

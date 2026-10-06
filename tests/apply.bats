@@ -12,6 +12,8 @@ setup() {
 @test "apply: makes api calls for each file in the config directory" {
     gh="$(mock_create)"
     mock_set_output "${gh}" "someuser/somerepo" 1
+    # Call 2: GET /repos/:owner/:repo for live default_branch
+    mock_set_output "${gh}" "main" 2
 
     _GH="${gh}" run ./gh-repo-config apply --config "${TEST_FIXTURES_DIR}"
 
@@ -27,20 +29,286 @@ setup() {
     call2=$(mock_get_call_args "${gh}" 2)
     assert_regex \
         "${call2}" \
-        "api -X PATCH /repos/:owner/:repo --input=${TEST_FIXTURES_DIR}/repo.json"
+        "api /repos/:owner/:repo"
 
     call3=$(mock_get_call_args "${gh}" 3)
     assert_regex \
         "${call3}" \
-        "api -X PUT /repos/:owner/:repo/topics --input=${TEST_FIXTURES_DIR}/topics.json"
+        "api -X PATCH /repos/:owner/:repo --input=${TEST_FIXTURES_DIR}/repo.json"
 
     call4=$(mock_get_call_args "${gh}" 4)
     assert_regex \
         "${call4}" \
-        "api -X PUT /repos/:owner/:repo/branches/main/protection --input=${TEST_FIXTURES_DIR}/branch-protection/main.json"
+        "api -X PUT /repos/:owner/:repo/topics --input=${TEST_FIXTURES_DIR}/topics.json"
 
     call5=$(mock_get_call_args "${gh}" 5)
     assert_regex \
         "${call5}" \
+        "api -X PUT /repos/:owner/:repo/branches/main/protection --input=${TEST_FIXTURES_DIR}/branch-protection/main.json"
+
+    call6=$(mock_get_call_args "${gh}" 6)
+    assert_regex \
+        "${call6}" \
         "api -X PUT /repos/:owner/:repo/branches/prod/protection --input=${TEST_FIXTURES_DIR}/branch-protection/prod.json"
+}
+
+@test "apply: branch-protection/default.json is resolved to the live default branch" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/branch-protection"
+    cp "${TEST_FIXTURES_DIR}/branch-protection/main.json" "${config_dir}/branch-protection/default.json"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "actual-default" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    call3=$(mock_get_call_args "${gh}" 3)
+    assert_regex \
+        "${call3}" \
+        "api -X PUT /repos/:owner/:repo/branches/actual-default/protection"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: default_branch change guard refuses without flag" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    # repo.json says default_branch is "other", but live is "main"
+    jq '.default_branch = "other"' "${TEST_FIXTURES_DIR}/repo.json" >"${config_dir}/repo.json"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    # Error about the mismatch must appear
+    assert_line --partial "ERROR: default_branch in repo.json ('other') differs from live ('main')"
+    assert_line --partial "--allow-default-branch-change"
+
+    # The PATCH still happens — just without default_branch (via --input=-)
+    call3=$(mock_get_call_args "${gh}" 3)
+    assert_regex \
+        "${call3}" \
+        "api -X PATCH /repos/:owner/:repo --input=-"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: default_branch change is allowed with --allow-default-branch-change" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    jq '.default_branch = "other"' "${TEST_FIXTURES_DIR}/repo.json" >"${config_dir}/repo.json"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}" --allow-default-branch-change
+    assert_success
+
+    # Should log the branch change
+    assert_line --partial "Changing default branch: 'main' -> 'other'"
+
+    # The PATCH uses the original file (not stripped)
+    call3=$(mock_get_call_args "${gh}" 3)
+    assert_regex \
+        "${call3}" \
+        "api -X PATCH /repos/:owner/:repo --input=${config_dir}/repo.json"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: labels are upserted (create new, update existing)" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    cp "${TEST_FIXTURES_DIR}/labels.json" "${config_dir}/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main" 2
+    # Call 3: GET /repos/:owner/:repo/labels/bug — returns success (label exists)
+    mock_set_output "${gh}" '{"name":"bug"}' 3
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    assert_line "[someuser/somerepo]: Configuring labels"
+
+    # Should PATCH the existing label
+    call4=$(mock_get_call_args "${gh}" 4)
+    assert_regex \
+        "${call4}" \
+        "api -X PATCH /repos/:owner/:repo/labels/bug"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: labels are created when they do not exist" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    cp "${TEST_FIXTURES_DIR}/labels.json" "${config_dir}/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main" 2
+    # Call 3: GET /repos/:owner/:repo/labels/bug — returns failure (label missing)
+    mock_set_status "${gh}" 1 3
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    # Should POST a new label
+    call4=$(mock_get_call_args "${gh}" 4)
+    assert_regex \
+        "${call4}" \
+        "api -X POST /repos/:owner/:repo/labels"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: environments are applied via PUT" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/environments"
+    cp "${TEST_FIXTURES_DIR}/environments/production.json" "${config_dir}/environments/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    assert_line "[someuser/somerepo]: Configuring environment 'production'"
+
+    call3=$(mock_get_call_args "${gh}" 3)
+    assert_regex \
+        "${call3}" \
+        "api -X PUT /repos/:owner/:repo/environments/production --input=${config_dir}/environments/production.json"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: private repos skip branch protection and rulesets" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/branch-protection" "${config_dir}/rulesets"
+    cp "${TEST_FIXTURES_DIR}/branch-protection/main.json" "${config_dir}/branch-protection/"
+    cp "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json" "${config_dir}/rulesets/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main true" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_line "[    warn]: Skipping branch protection: unavailable on private repos"
+    assert_line "[    warn]: Skipping rulesets: unavailable on private repos"
+
+    # Only the repo view and the repo GET happened.
+    run mock_get_call_num "${gh}"
+    assert_output "2"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: rulesets are created when no ruleset has the same name" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/rulesets"
+    cp "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json" "${config_dir}/rulesets/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+    mock_set_output "${gh}" '[{"id":1,"name":"other"}]' 3
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_line "[someuser/somerepo]: Configuring ruleset 'require pr'"
+
+    assert_regex "$(mock_get_call_args "${gh}" 3)" "rulesets\?includes_parents=false"
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 4)" \
+        "api -X POST /repos/:owner/:repo/rulesets --input=${config_dir}/rulesets/require-pr.json"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: rulesets are updated by id when one with the same name exists" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/rulesets"
+    cp "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json" "${config_dir}/rulesets/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+    mock_set_output "${gh}" '[{"id":4242,"name":"require pr"}]' 3
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 4)" \
+        "api -X PUT /repos/:owner/:repo/rulesets/4242 --input=${config_dir}/rulesets/require-pr.json"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: actions.json sets allowed actions and workflow permissions" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    cp "${TEST_FIXTURES_DIR}/expected/actions.json" "${config_dir}/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_line "[someuser/somerepo]: Configuring Actions permissions"
+
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 3)" \
+        "api -X PUT /repos/:owner/:repo/actions/permissions --input=-"
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 4)" \
+        "api -X PUT /repos/:owner/:repo/actions/permissions/workflow --input=-"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: security.json enables or disables vulnerability alerts" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    cp "${TEST_FIXTURES_DIR}/expected/security.json" "${config_dir}/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 3)" \
+        "api -X PUT /repos/:owner/:repo/vulnerability-alerts"
+
+    echo '{"vulnerability_alerts": false}' >"${config_dir}/security.json"
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 3)" \
+        "api -X DELETE /repos/:owner/:repo/vulnerability-alerts"
+
+    rm -rf "${config_dir}"
 }

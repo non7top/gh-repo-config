@@ -32,11 +32,18 @@ This will generate a number of files in .github/config:
 └── repo.json
 ```
 
-The JSON files are API payloads for the following endpoints:
+The files are generated from the repo's live settings (plus `actions.json`, `environments/`, `labels.json`, `rulesets/` and `security.json` when present). They are API payloads for the following endpoints:
 
 - `./repo.json`: [Update repository](https://docs.github.com/en/rest/repos/repos#update-a-repository)
 - `./topics.json`: [Replace repository topics](https://docs.github.com/en/rest/repos/repos#replace-all-repository-topics)
-- `./branch-protection/${name}.json`: [Update branch protection](https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection)
+- `./branch-protection/${name}.json`: [Update branch protection](https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection). `default.json` targets the live default branch.
+- `./rulesets/${name}.json`: [Create](https://docs.github.com/en/rest/repos/rules#create-a-repository-ruleset) or [update](https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset) a ruleset, matched by `name`
+- `./labels.json`: [Labels](https://docs.github.com/en/rest/issues/labels), created or updated, never deleted
+- `./environments/${name}.json`: [Create or update an environment](https://docs.github.com/en/rest/deployments/environments#create-or-update-an-environment)
+- `./actions.json`: [Actions permissions](https://docs.github.com/en/rest/actions/permissions), including whether Actions can create and approve pull requests (needed by release-please)
+- `./security.json`: [Vulnerability alerts](https://docs.github.com/en/rest/repos/repos#enable-vulnerability-alerts)
+
+Private repos on a free plan can't have branch protection or rulesets, so `init` and `apply` skip both for them.
 
 Edit the default values to your liking. To apply the settings, run:
 

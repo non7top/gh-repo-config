@@ -1,0 +1,10 @@
+[
+  {
+    "id": 4242,
+    "name": "require pr",
+    "target": "branch",
+    "source_type": "Repository",
+    "source": "testowner/gh-repo-config",
+    "enforcement": "active"
+  }
+]
