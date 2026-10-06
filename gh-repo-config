@@ -299,9 +299,8 @@ app::init() {
     log "Done"
 }
 
-app::pull() {
-    log "Pulling settings..."
-
+# Print the live settings as a config document, without x-comment fields.
+app::live_doc() {
     local repo_info default_branch repo_private
     repo_info=$("${_GH}" api /repos/:owner/:repo)
     default_branch=$(printf '%s' "${repo_info}" | jq -r '.default_branch')
@@ -376,8 +375,7 @@ app::pull() {
         alerts_enabled="true"
     fi
 
-    local doc
-    doc=$(jq -n \
+    jq -n \
         --argjson repo "${repo_json}" \
         --argjson topics "${topics_json}" \
         --argjson branch_protection "${bp_json}" \
@@ -395,7 +393,72 @@ app::pull() {
             environments: $environments,
             actions: $actions,
             vulnerability_alerts: $vulnerability_alerts
-        } | with_entries(select(.value != null))')
+        } | with_entries(select(.value != null))'
+}
+
+# Print the live document with the config file's sections applied the way push
+# (or sync, when prune is true) would: object fields are merged, so anything the
+# file leaves out stays as it is live.
+app::desired_doc() {
+    local -r live="$1"
+    local -r default_branch="$2"
+    local -r repo_private="$3"
+    local -r prune="$4"
+    local allow="false"
+    if [ "${APP_ALLOW_DEFAULT_BRANCH_CHANGE}" = "true" ]; then
+        allow="true"
+    fi
+    jq --slurpfile cfg "${APP_CONFIG}" \
+        --arg def "${default_branch}" \
+        --argjson private "${repo_private}" \
+        --argjson prune "${prune}" \
+        --argjson allow "${allow}" '
+        def by_name($cfg):
+            . as $live
+            | ($live | map(. as $l
+                | (first($cfg[] | select(.name == $l.name)) // null) as $r
+                | if $r then $l * $r else $l end))
+              + [$cfg[] | select(.name as $n | any($live[]; .name == $n) | not)]
+            | if $prune then map(select(.name as $n | any($cfg[]; .name == $n))) else . end;
+        ($cfg[0] | with_entries(select(.key | startswith("x-comment-") | not))) as $c
+        | ($c.repo // {}) as $r
+        | (if ($r.default_branch // $def) != $def and ($allow | not) then $r | del(.default_branch) else $r end) as $r
+        | (if $c | has("repo") then .repo = (.repo * $r) else . end)
+        | (if $c | has("topics") then .topics = $c.topics else . end)
+        | (if ($c | has("branch_protection")) and ($private | not) then
+            .branch_protection = (
+                ($c.branch_protection | with_entries(if .key == $def then .key = "~DEFAULT_BRANCH" else . end)) as $bp
+                | ((.branch_protection // {}) * $bp)
+                | if $prune then with_entries(select(.key | in($bp))) else . end)
+          else . end)
+        | (if ($c | has("rulesets")) and ($private | not) then
+            .rulesets = ((.rulesets // []) | by_name($c.rulesets))
+          else . end)
+        | (if $c | has("labels") then .labels = ((.labels // []) | by_name($c.labels)) else . end)
+        | (if $c | has("environments") then
+            .environments = (((.environments // {}) * $c.environments)
+                | if $prune then with_entries(select(.key | in($c.environments))) else . end)
+          else . end)
+        | (if $c | has("actions") then .actions = ((.actions // {}) * $c.actions) else . end)
+        | (if $c | has("vulnerability_alerts") then .vulnerability_alerts = $c.vulnerability_alerts else . end)
+        ' <<<"${live}"
+}
+
+# Show what push or sync would change, as a unified diff whose hunk headers name the section.
+app::show_diff() {
+    local -r live="$1"
+    local -r desired="$2"
+    if diff -u --label live --label "${APP_CONFIG}" --show-function-line='^  "[a-z_]*": [[{]' \
+        <(printf '%s\n' "${live}") <(printf '%s\n' "${desired}") >&2; then
+        log "No changes: live settings already match ${APP_CONFIG}."
+    fi
+}
+
+app::pull() {
+    log "Pulling settings..."
+
+    local doc
+    doc=$(app::live_doc)
 
     # Every section gets an "x-comment-<section>" sibling: user-written comments
     # survive a pull, new ones default to the section's API docs link.
@@ -521,6 +584,13 @@ app::push() {
                 return 1
             fi
         fi
+    fi
+
+    if [ "${APP_DRY_RUN}" = "true" ]; then
+        local live_doc desired_doc
+        live_doc=$(app::live_doc)
+        desired_doc=$(app::desired_doc "${live_doc}" "${live_default_branch}" "${repo_private}" "${prune}")
+        app::show_diff "${live_doc}" "${desired_doc}"
     fi
 
     if app::has repo; then

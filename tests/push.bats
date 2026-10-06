@@ -212,3 +212,51 @@ EOF
     assert_line "[someuser/somerepo]: Configuring repo"
     assert_line "[someuser/somerepo]: Configuring vulnerability alerts"
 }
+
+@test "push: --dry-run shows a diff of what would change, with the section in the hunk header" {
+    echo '{"repo": {"description": "new words"}}' >"${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}" --dry-run
+    assert_success
+    assert_line --regexp '^@@ .* @@ "repo": \{$'
+    assert_line '-    "description": "",'
+    assert_line '+    "description": "new words",'
+}
+
+@test "push: --dry-run says so when the live settings already match" {
+    run ./gh-repo-config pull --config "${CONFIG}"
+    assert_success
+
+    run ./gh-repo-config push --config "${CONFIG}" --dry-run
+    assert_success
+    assert_line --partial "No changes: live settings already match"
+}
+
+@test "push: --dry-run leaves fields the file does not mention out of the diff" {
+    echo '{"repo": {"has_issues": true}}' >"${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}" --dry-run
+    assert_success
+    assert_line --partial "No changes"
+}
+
+@test "push: --dry-run does not show labels missing from the file as removed" {
+    set_api GET /repos/:owner/:repo/labels '[
+        {"name":"bug","color":"d73a4a","description":"Something isn'"'"'t working"},
+        {"name":"stale thing","color":"ffffff","description":""}
+    ]'
+    jq '{labels}' "${FULL_CONFIG}" >"${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}" --dry-run
+    assert_success
+    assert_line --partial "No changes"
+}
+
+@test "push: --dry-run shows a changed label color" {
+    jq '{labels: [.labels[0] | .color = "ffffff"]}' "${FULL_CONFIG}" >"${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}" --dry-run
+    assert_success
+    assert_line '-      "color": "d73a4a",'
+    assert_line '+      "color": "ffffff",'
+}

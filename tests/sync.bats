@@ -18,6 +18,8 @@ setup() {
         {"id":4242,"name":"require pr"},
         {"id":9,"name":"old rule"}
     ]'
+    set_api GET /repos/:owner/:repo/rulesets/9 "$(jq '.id = 9 | .name = "old rule"' \
+        "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo__rulesets__4242.json")"
     set_api GET /repos/:owner/:repo/environments "$(jq '
         .total_count = 2
         | .environments += [(.environments[0] | .name = "staging")]
@@ -26,6 +28,8 @@ setup() {
         {"name":"main","protected":true},
         {"name":"release/1","protected":true}
     ]'
+    cp "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo__branches__main__protection.json" \
+        "${FAKE_GH_FIXTURES}/GET__repos__owner__repo__branches__release__1__protection.json"
 }
 
 teardown() {
@@ -128,4 +132,13 @@ teardown() {
 
     run gh_calls
     refute_output --partial "DELETE"
+}
+
+@test "sync: --dry-run diff shows what would be deleted" {
+    run ./gh-repo-config sync --config "${FULL_CONFIG}" --dry-run
+    assert_success
+    assert_line --regexp '^-.*"name": "stale thing"'
+    assert_line --regexp '^-.*"name": "old rule"'
+    assert_line --regexp '^-.*"staging": \{'
+    assert_line --regexp '^-.*"release/1": \{'
 }
