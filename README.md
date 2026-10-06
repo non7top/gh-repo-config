@@ -11,7 +11,7 @@
 2. Install this extension:
 
    ```sh
-   gh extension install twelvelabs/gh-repo-config
+   gh extension install non7top/gh-repo-config
    ```
 
 ## Usage
@@ -79,7 +79,7 @@ An editor schema with a description per section is in [`repo-config.schema.json`
 ## Development
 
 ```sh
-git clone git@github.com:twelvelabs/gh-repo-config.git
+git clone git@github.com:non7top/gh-repo-config.git
 cd ./gh-repo-config
 
 # Bootstrap for local development
