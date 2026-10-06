@@ -4,14 +4,6 @@ SHELL := /bin/bash
 
 ##@ App
 
-.PHONY: format
-format: ## Format source code
-	@echo "TODO..."
-
-.PHONY: lint
-lint: ## Lint source code
-	@echo "TODO..."
-
 .PHONY: test
 test: export APP_ENV := test
 test: ## Test the extension

@@ -18,8 +18,5 @@ jobs:
         with:
           submodules: true
 
-      - name: Lint
-        run: make lint
-
       - name: Test
         run: make test
