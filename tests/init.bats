@@ -172,3 +172,28 @@ setup_init_mock() {
     assert_line --partial "No branch protection rules found for 'main'"
     assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
 }
+
+@test "init: repo.json carries extended security_and_analysis and merge commit fields" {
+    local gh extended
+    extended=$(jq '
+        .has_discussions = true
+        | .merge_commit_title = "MERGE_MESSAGE"
+        | .merge_commit_message = "PR_TITLE"
+        | .security_and_analysis += {
+            "secret_scanning_push_protection": {"status": "enabled"},
+            "dependabot_security_updates": {"status": "disabled"}
+        }' "${TEST_FIXTURES_DIR}/api-responses/repo.json")
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "${extended}" 1
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
+    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
+
+    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    assert_success
+
+    run jq -c '[.has_discussions, .merge_commit_title, .merge_commit_message, .security_and_analysis.secret_scanning_push_protection.status, .security_and_analysis.dependabot_security_updates.status]' "${TEST_TEMP_DIR}/repo.json"
+    assert_output '[true,"MERGE_MESSAGE","PR_TITLE","enabled","disabled"]'
+}

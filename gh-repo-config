@@ -240,20 +240,27 @@ app::init() {
         default_branch,
         delete_branch_on_merge,
         description,
+        has_discussions,
         has_issues,
         has_projects,
         has_wiki,
         homepage,
+        merge_commit_message,
+        merge_commit_title,
         security_and_analysis: (
-            if .security_and_analysis then {
-                advanced_security: (if .security_and_analysis.advanced_security then {status: .security_and_analysis.advanced_security.status} else null end),
-                secret_scanning: (if .security_and_analysis.secret_scanning then {status: .security_and_analysis.secret_scanning.status} else null end)
-            } else null end
+            .security_and_analysis as $sa
+            | if $sa then
+                reduce (
+                    "advanced_security", "dependabot_security_updates", "secret_scanning",
+                    "secret_scanning_push_protection", "secret_scanning_non_provider_patterns",
+                    "secret_scanning_validity_checks"
+                ) as $key ({}; if $sa[$key] then .[$key] = {status: $sa[$key].status} else . end)
+              else null end
         ),
         squash_merge_commit_message,
         squash_merge_commit_title,
         web_commit_signoff_required
-    }')
+    } | with_entries(select(.value != null))')
     app::init_file "${APP_CONFIG}/repo.json" "${repo_json}"
 
     # Generate topics.json: GET response shape matches PUT body exactly
