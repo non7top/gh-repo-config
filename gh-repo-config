@@ -166,6 +166,15 @@ app::apply() {
                 "${_GH}" api -X PUT /repos/:owner/:repo/actions/permissions/workflow --input=- >/dev/null
         fi
     fi
+
+    if [ -f "${APP_CONFIG}/security.json" ]; then
+        log:api "${repo}" "Configuring vulnerability alerts"
+        if [ "$(jq -r '.vulnerability_alerts' "${APP_CONFIG}/security.json")" = "true" ]; then
+            "${_GH}" api -X PUT /repos/:owner/:repo/vulnerability-alerts >/dev/null
+        else
+            "${_GH}" api -X DELETE /repos/:owner/:repo/vulnerability-alerts >/dev/null
+        fi
+    fi
 }
 
 app::confirm() {
@@ -383,6 +392,13 @@ app::init() {
         } | del(..|nulls)')
         app::init_file "${APP_CONFIG}/actions.json" "${actions_json}"
     fi
+
+    # Generate security.json: the vulnerability-alerts endpoint answers 204 or 404
+    local alerts_enabled="false"
+    if "${_GH}" api /repos/:owner/:repo/vulnerability-alerts >/dev/null 2>&1; then
+        alerts_enabled="true"
+    fi
+    app::init_file "${APP_CONFIG}/security.json" "$(jq -n --argjson v "${alerts_enabled}" '{vulnerability_alerts: $v}')"
 
     log "Done"
 }

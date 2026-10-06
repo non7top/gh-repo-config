@@ -283,3 +283,32 @@ setup() {
 
     rm -rf "${config_dir}"
 }
+
+@test "apply: security.json enables or disables vulnerability alerts" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    cp "${TEST_FIXTURES_DIR}/expected/security.json" "${config_dir}/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 3)" \
+        "api -X PUT /repos/:owner/:repo/vulnerability-alerts"
+
+    echo '{"vulnerability_alerts": false}' >"${config_dir}/security.json"
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 3)" \
+        "api -X DELETE /repos/:owner/:repo/vulnerability-alerts"
+
+    rm -rf "${config_dir}"
+}

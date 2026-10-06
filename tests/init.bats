@@ -216,7 +216,7 @@ setup_init_mock() {
 
     # No protection or ruleset endpoint was called.
     run mock_get_call_num "${gh}"
-    assert_output "6"
+    assert_output "7"
 }
 
 @test "init: should generate rulesets from live API data" {
@@ -254,4 +254,29 @@ setup_init_mock() {
     assert_files_equal \
         "${TEST_TEMP_DIR}/actions.json" \
         "${TEST_FIXTURES_DIR}/expected/actions.json"
+}
+
+@test "init: should generate security.json from live API data" {
+    local gh
+    gh="$(setup_init_mock)"
+
+    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    assert_success
+
+    assert_files_equal \
+        "${TEST_TEMP_DIR}/security.json" \
+        "${TEST_FIXTURES_DIR}/expected/security.json"
+}
+
+@test "init: vulnerability alerts are recorded as false when the endpoint fails" {
+    local gh
+    gh="$(setup_init_mock)"
+    # Calls 6-8: rulesets list, actions permissions, actions workflow. Call 9: vulnerability alerts.
+    mock_set_status "${gh}" 1 9
+
+    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    assert_success
+
+    run jq -r '.vulnerability_alerts' "${TEST_TEMP_DIR}/security.json"
+    assert_output "false"
 }
