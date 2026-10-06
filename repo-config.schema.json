@@ -32,7 +32,7 @@
       }
     },
     "branch_protection": {
-      "description": "Branch name to the body of PUT /repos/{owner}/{repo}/branches/{branch}/protection. Unavailable on private repos on a free plan. https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection",
+      "description": "Branch name (or ~DEFAULT_BRANCH for the current default branch) to the body of PUT /repos/{owner}/{repo}/branches/{branch}/protection. Unavailable on private repos on a free plan. https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection",
       "type": "object",
       "additionalProperties": { "type": "object" }
     },

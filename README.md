@@ -46,7 +46,7 @@ Each section is the request body of one GitHub API endpoint, using the API's own
 | --- | --- |
 | `repo` | [Update a repository](https://docs.github.com/en/rest/repos/repos#update-a-repository) |
 | `topics` | [Replace all repository topics](https://docs.github.com/en/rest/repos/repos#replace-all-repository-topics) |
-| `branch_protection` | [Update branch protection](https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection), keyed by branch name |
+| `branch_protection` | [Update branch protection](https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection), keyed by branch name. The key `~DEFAULT_BRANCH` (GitHub's own token, as in rulesets) means whatever the default branch currently is, so a rename doesn't stale the file. |
 | `rulesets` | [Create](https://docs.github.com/en/rest/repos/rules#create-a-repository-ruleset) / [update](https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset) a ruleset, matched by `name` |
 | `labels` | [Labels](https://docs.github.com/en/rest/issues/labels): `name`, `color`, `description` |
 | `environments` | [Create or update an environment](https://docs.github.com/en/rest/deployments/environments#create-or-update-an-environment), keyed by name |
