@@ -5,6 +5,7 @@ APP_NAME="$(basename "$0")"
 APP_VERSION="1.0.0"
 APP_CONFIG=".github/config"
 APP_CMD="help"
+APP_ALLOW_DEFAULT_BRANCH_CHANGE="false"
 
 # `APP_ENV` is set by `make test`.
 # `_GH` allows us to mock the `gh` binary in tests (see apply.bats).
@@ -15,68 +16,10 @@ else
     _GH="gh"
 fi
 
-JSON_REPO=$(
-    cat <<'EOL'
-{
-    "allow_auto_merge": false,
-    "allow_merge_commit": false,
-    "allow_rebase_merge": false,
-    "allow_squash_merge": true,
-    "allow_update_branch": true,
-    "default_branch": "main",
-    "delete_branch_on_merge": true,
-    "description": "",
-    "has_issues": true,
-    "has_projects": true,
-    "has_wiki": true,
-    "homepage": "",
-    "security_and_analysis": {
-        "advanced_security": {
-            "status": "enabled"
-        },
-        "secret_scanning": {
-            "status": "enabled"
-        }
-    },
-    "squash_merge_commit_message": "BLANK",
-    "squash_merge_commit_title": "PR_TITLE",
-    "web_commit_signoff_required": false
-}
-EOL
-)
-
-JSON_TOPICS=$(
-    cat <<'EOL'
-{
-    "names": []
-}
-EOL
-)
-
-JSON_BRANCH_PROTECTION=$(
-    cat <<'EOL'
-{
-    "allow_force_pushes": false,
-    "allow_deletions": false,
-    "block_creations": false,
-    "enforce_admins": false,
-    "required_conversation_resolution": false,
-    "required_linear_history": true,
-    "required_pull_request_reviews": {
-        "dismiss_stale_reviews": true,
-        "require_code_owner_reviews": true,
-        "required_approving_review_count": 1,
-        "require_last_push_approval": false
-    },
-    "required_signatures": true,
-    "required_status_checks": {
-        "strict": true,
-        "checks": []
-    },
-    "restrictions": null
-}
-EOL
-)
+if ! command -v jq &>/dev/null; then
+    echo "Error: jq is required but not installed. Install it from https://stedolan.github.io/jq/"
+    exit 1
+fi
 
 log() {
     local -r msg="$1"
@@ -101,12 +44,37 @@ log:api() {
 }
 
 app::apply() {
+    local repo
     repo=$("${_GH}" repo view --json nameWithOwner --jq .nameWithOwner)
+
+    # Fetch live default branch (used for default_branch change guard and
+    # resolving branch-protection/default.json to the actual branch name)
+    local live_default_branch
+    live_default_branch=$("${_GH}" api /repos/:owner/:repo --jq .default_branch)
 
     if [ -f "${APP_CONFIG}/repo.json" ]; then
         log:api "${repo}" "Configuring repo"
-        "${_GH}" api -X PATCH /repos/:owner/:repo \
-            --input="${APP_CONFIG}/repo.json" >/dev/null
+
+        local config_default_branch
+        config_default_branch=$(jq -r '.default_branch // empty' "${APP_CONFIG}/repo.json")
+
+        if [ -n "${config_default_branch}" ] && [ "${config_default_branch}" != "${live_default_branch}" ]; then
+            if [ "${APP_ALLOW_DEFAULT_BRANCH_CHANGE}" != "true" ]; then
+                log "ERROR: default_branch in repo.json ('${config_default_branch}') differs from live ('${live_default_branch}')."
+                log "  Refusing to change default branch without explicit opt-in."
+                log "  Run with --allow-default-branch-change to allow this change."
+                log "  Applying remaining repo.json fields without default_branch."
+                jq 'del(.default_branch)' "${APP_CONFIG}/repo.json" | \
+                    "${_GH}" api -X PATCH /repos/:owner/:repo --input=- >/dev/null
+            else
+                log:api "${repo}" "Changing default branch: '${live_default_branch}' -> '${config_default_branch}'"
+                "${_GH}" api -X PATCH /repos/:owner/:repo \
+                    --input="${APP_CONFIG}/repo.json" >/dev/null
+            fi
+        else
+            "${_GH}" api -X PATCH /repos/:owner/:repo \
+                --input="${APP_CONFIG}/repo.json" >/dev/null
+        fi
     fi
 
     if [ -f "${APP_CONFIG}/topics.json" ]; then
@@ -116,13 +84,48 @@ app::apply() {
     fi
 
     if [ -d "${APP_CONFIG}/branch-protection" ]; then
-        for filepath in "${APP_CONFIG}/branch-protection/"*; do
+        for filepath in "${APP_CONFIG}/branch-protection/"*.json; do
+            [ -f "${filepath}" ] || continue
+            local branch
             branch=$(basename "${filepath}" ".json")
+            if [ "${branch}" = "default" ]; then
+                branch="${live_default_branch}"
+            fi
             log:api "${repo}" "Configuring branch protection rules for '${branch}'"
             "${_GH}" api -X PUT "/repos/:owner/:repo/branches/${branch}/protection" \
                 --input="${filepath}" >/dev/null
         done
     fi
+
+    if [ -f "${APP_CONFIG}/labels.json" ]; then
+        log:api "${repo}" "Configuring labels"
+        while IFS= read -r label_json; do
+            local label_name encoded_name
+            label_name=$(printf '%s' "${label_json}" | jq -r '.name')
+            encoded_name=$(printf '%s' "${label_name}" | jq -Rr '@uri')
+            if "${_GH}" api "/repos/:owner/:repo/labels/${encoded_name}" >/dev/null 2>&1; then
+                printf '%s' "${label_json}" | \
+                    "${_GH}" api -X PATCH "/repos/:owner/:repo/labels/${encoded_name}" \
+                    --input=- >/dev/null
+            else
+                printf '%s' "${label_json}" | \
+                    "${_GH}" api -X POST /repos/:owner/:repo/labels \
+                    --input=- >/dev/null
+            fi
+        done < <(jq -c '.[]' "${APP_CONFIG}/labels.json")
+    fi
+
+    if [ -d "${APP_CONFIG}/environments" ]; then
+        for filepath in "${APP_CONFIG}/environments/"*.json; do
+            [ -f "${filepath}" ] || continue
+            local env_name
+            env_name=$(basename "${filepath}" ".json")
+            log:api "${repo}" "Configuring environment '${env_name}'"
+            "${_GH}" api -X PUT "/repos/:owner/:repo/environments/${env_name}" \
+                --input="${filepath}" >/dev/null
+        done
+    fi
+
 }
 
 app::confirm() {
@@ -156,19 +159,142 @@ app::help() {
     echo "  $ gh repo-config apply --config ./repo-settings"
     echo ""
     echo "Options:"
-    echo "  -c, --config <dir>   Config directory [default: ${APP_CONFIG}]."
-    echo "  -h, --help           Show usage."
-    echo "  -v, --version        Show version."
+    echo "  -c, --config <dir>             Config directory [default: ${APP_CONFIG}]."
+    echo "  --allow-default-branch-change  Allow apply to change the repo's default branch."
+    echo "  -h, --help                     Show usage."
+    echo "  -v, --version                  Show version."
     echo ""
+}
+
+# Transform GET /repos/{owner}/{repo}/branches/{branch}/protection response
+# into the shape accepted by PUT (same endpoint).
+# The GET response wraps boolean fields in objects; the PUT body wants flat booleans.
+app::bp_get_to_put() {
+    jq '{
+        allow_force_pushes: (.allow_force_pushes.enabled // false),
+        allow_deletions: (.allow_deletions.enabled // false),
+        block_creations: (.block_creations.enabled // false),
+        enforce_admins: (.enforce_admins.enabled // false),
+        required_conversation_resolution: (.required_conversation_resolution.enabled // false),
+        required_linear_history: (.required_linear_history.enabled // false),
+        required_pull_request_reviews: (
+            if .required_pull_request_reviews then {
+                dismiss_stale_reviews: (.required_pull_request_reviews.dismiss_stale_reviews // false),
+                require_code_owner_reviews: (.required_pull_request_reviews.require_code_owner_reviews // false),
+                required_approving_review_count: (.required_pull_request_reviews.required_approving_review_count // 0),
+                require_last_push_approval: (.required_pull_request_reviews.require_last_push_approval // false)
+            } else null end
+        ),
+        required_signatures: (.required_signatures.enabled // false),
+        required_status_checks: (
+            if .required_status_checks then {
+                strict: (.required_status_checks.strict // false),
+                checks: (.required_status_checks.checks // [])
+            } else null end
+        ),
+        restrictions: (
+            if .restrictions then {
+                users: [.restrictions.users[].login],
+                teams: [.restrictions.teams[].slug],
+                apps: [.restrictions.apps[].slug]
+            } else null end
+        )
+    }'
+}
+
+# Transform GET /repos/{owner}/{repo}/environments response for one environment
+# into the shape accepted by PUT /repos/{owner}/{repo}/environments/{name}.
+app::env_get_to_put() {
+    local -r env_name="$1"
+    local -r envs_json="$2"
+    printf '%s' "${envs_json}" | jq --arg name "${env_name}" '
+        .environments[] | select(.name == $name) |
+        {
+            wait_timer: (reduce .protection_rules[] as $rule (null; if $rule.type == "wait_timer" then $rule.wait_timer else . end)),
+            prevent_self_review: (reduce .protection_rules[] as $rule (false; if $rule.type == "prevent_self_review" then $rule.prevent_self_review else . end)),
+            reviewers: ([.protection_rules[] | select(.type == "required_reviewers") | .reviewers[] | {type: .type, id: .reviewer.id}]),
+            deployment_branch_policy: .deployment_branch_policy
+        }
+    '
 }
 
 app::init() {
     log "Initializing config..."
+
+    # Fetch live repo info (includes default_branch)
+    local repo_info
+    repo_info=$("${_GH}" api /repos/:owner/:repo)
+    local default_branch
+    default_branch=$(printf '%s' "${repo_info}" | jq -r '.default_branch')
+
     app::init_dir "${APP_CONFIG}"
-    app::init_file "${APP_CONFIG}/repo.json" "${JSON_REPO}"
-    app::init_file "${APP_CONFIG}/topics.json" "${JSON_TOPICS}"
+
+    # Generate repo.json: filter GET response to writable fields only
+    local repo_json
+    repo_json=$(printf '%s' "${repo_info}" | jq '{
+        allow_auto_merge,
+        allow_merge_commit,
+        allow_rebase_merge,
+        allow_squash_merge,
+        allow_update_branch,
+        default_branch,
+        delete_branch_on_merge,
+        description,
+        has_issues,
+        has_projects,
+        has_wiki,
+        homepage,
+        security_and_analysis: (
+            if .security_and_analysis then {
+                advanced_security: (if .security_and_analysis.advanced_security then {status: .security_and_analysis.advanced_security.status} else null end),
+                secret_scanning: (if .security_and_analysis.secret_scanning then {status: .security_and_analysis.secret_scanning.status} else null end)
+            } else null end
+        ),
+        squash_merge_commit_message,
+        squash_merge_commit_title,
+        web_commit_signoff_required
+    }')
+    app::init_file "${APP_CONFIG}/repo.json" "${repo_json}"
+
+    # Generate topics.json: GET response shape matches PUT body exactly
+    local topics_json
+    topics_json=$("${_GH}" api /repos/:owner/:repo/topics)
+    app::init_file "${APP_CONFIG}/topics.json" "${topics_json}"
+
+    # Generate branch-protection/default.json from the live default branch.
+    # "default" is a special filename resolved at apply time — it doesn't hardcode
+    # the branch name, so it survives branch renames.
     app::init_dir "${APP_CONFIG}/branch-protection"
-    app::init_file "${APP_CONFIG}/branch-protection/main.json" "${JSON_BRANCH_PROTECTION}"
+    local bp_raw
+    if bp_raw=$("${_GH}" api "/repos/:owner/:repo/branches/${default_branch}/protection" 2>/dev/null); then
+        local bp_json
+        bp_json=$(printf '%s' "${bp_raw}" | app::bp_get_to_put)
+        app::init_file "${APP_CONFIG}/branch-protection/default.json" "${bp_json}"
+    else
+        log:action "warn" "No branch protection rules found for '${default_branch}' — skipping"
+    fi
+
+    # Generate labels.json: one array file, only writable fields
+    local labels_json
+    labels_json=$("${_GH}" api /repos/:owner/:repo/labels --paginate | \
+        jq -s 'add // [] | [.[] | {name, color, description}]')
+    app::init_file "${APP_CONFIG}/labels.json" "${labels_json}"
+
+    # Generate environments/*.json: one file per environment, writable fields only
+    app::init_dir "${APP_CONFIG}/environments"
+    local envs_response
+    if envs_response=$("${_GH}" api /repos/:owner/:repo/environments 2>/dev/null); then
+        local env_count
+        env_count=$(printf '%s' "${envs_response}" | jq '.total_count')
+        if [ "${env_count}" -gt 0 ]; then
+            while IFS= read -r env_name; do
+                local env_json
+                env_json=$(app::env_get_to_put "${env_name}" "${envs_response}")
+                app::init_file "${APP_CONFIG}/environments/${env_name}.json" "${env_json}"
+            done < <(printf '%s' "${envs_response}" | jq -r '.environments[].name')
+        fi
+    fi
+
     log "Done"
 }
 
@@ -189,13 +315,13 @@ app::init_file() {
         log:action "warn" "${path} already exists!"
         if app::confirm "Overwrite?"; then
             log:action "replace" "${path}"
-            echo "${content}" >"${path}"
+            printf '%s\n' "${content}" >"${path}"
         else
             log:action "keep" "${path}"
         fi
     else
         log:action "create" "${path}"
-        echo "${content}" >"${path}"
+        printf '%s\n' "${content}" >"${path}"
     fi
 }
 
@@ -218,6 +344,10 @@ app::parseargs() {
         -c | --config)
             APP_CONFIG="${2:?empty config path not allowed}"
             shift 2
+            ;;
+        --allow-default-branch-change)
+            APP_ALLOW_DEFAULT_BRANCH_CHANGE="true"
+            shift
             ;;
         -h | --help)
             APP_CMD="help"
