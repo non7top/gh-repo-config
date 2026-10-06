@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "gh-repo-config",
+  "description": "Declarative GitHub repository settings. Each section is the request body of one GitHub REST API endpoint. Sections left out are not touched by push or sync.",
+  "type": "object",
+  "properties": {
+    "repo": {
+      "description": "Body of PATCH /repos/{owner}/{repo}. https://docs.github.com/en/rest/repos/repos#update-a-repository",
+      "type": "object",
+      "properties": {
+        "default_branch": {
+          "description": "Push refuses to change this unless --allow-default-branch-change is given.",
+          "type": "string"
+        },
+        "security_and_analysis": {
+          "description": "https://docs.github.com/en/rest/repos/repos#update-a-repository",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "status": { "enum": ["enabled", "disabled"] }
+            }
+          }
+        }
+      }
+    },
+    "topics": {
+      "description": "Body of PUT /repos/{owner}/{repo}/topics. https://docs.github.com/en/rest/repos/repos#replace-all-repository-topics",
+      "type": "object",
+      "properties": {
+        "names": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "branch_protection": {
+      "description": "Branch name to the body of PUT /repos/{owner}/{repo}/branches/{branch}/protection. Unavailable on private repos on a free plan. https://docs.github.com/en/rest/branches/branch-protection#update-branch-protection",
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    },
+    "rulesets": {
+      "description": "Bodies of POST/PUT /repos/{owner}/{repo}/rulesets, matched by name. Unavailable on private repos on a free plan. https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "enforcement"],
+        "properties": {
+          "name": { "type": "string" },
+          "target": { "enum": ["branch", "tag", "push"] },
+          "enforcement": { "enum": ["disabled", "active", "evaluate"] }
+        }
+      }
+    },
+    "labels": {
+      "description": "Created or updated by name. https://docs.github.com/en/rest/issues/labels",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "color": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "environments": {
+      "description": "Environment name to the body of PUT /repos/{owner}/{repo}/environments/{name}. https://docs.github.com/en/rest/deployments/environments#create-or-update-an-environment",
+      "type": "object",
+      "additionalProperties": { "type": "object" }
+    },
+    "actions": {
+      "description": "https://docs.github.com/en/rest/actions/permissions",
+      "type": "object",
+      "properties": {
+        "permissions": {
+          "description": "Body of PUT /repos/{owner}/{repo}/actions/permissions.",
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allowed_actions": { "enum": ["all", "local_only", "selected"] }
+          }
+        },
+        "workflow": {
+          "description": "Body of PUT /repos/{owner}/{repo}/actions/permissions/workflow. can_approve_pull_request_reviews is the 'allow Actions to create and approve pull requests' setting.",
+          "type": "object",
+          "properties": {
+            "default_workflow_permissions": { "enum": ["read", "write"] },
+            "can_approve_pull_request_reviews": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "vulnerability_alerts": {
+      "description": "true calls PUT /repos/{owner}/{repo}/vulnerability-alerts, false calls DELETE. https://docs.github.com/en/rest/repos/repos#enable-vulnerability-alerts",
+      "type": "boolean"
+    }
+  },
+  "patternProperties": {
+    "^x-comment-": {
+      "description": "A free-text note about the section it is named after. Never sent to the API; pull keeps it.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}
