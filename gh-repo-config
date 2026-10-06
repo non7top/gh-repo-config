@@ -131,6 +131,29 @@ app::apply() {
         done
     fi
 
+    if [ -d "${APP_CONFIG}/rulesets" ]; then
+        if [ "${repo_private}" = "true" ]; then
+            log:action "warn" "Skipping rulesets: unavailable on private repos"
+        else
+            local existing_rulesets
+            existing_rulesets=$("${_GH}" api "/repos/:owner/:repo/rulesets?includes_parents=false")
+            for filepath in "${APP_CONFIG}/rulesets/"*.json; do
+                [ -f "${filepath}" ] || continue
+                local ruleset_name ruleset_id
+                ruleset_name=$(jq -r '.name' "${filepath}")
+                ruleset_id=$(printf '%s' "${existing_rulesets}" | \
+                    jq -r --arg name "${ruleset_name}" 'first(.[] | select(.name == $name) | .id) // empty')
+                log:api "${repo}" "Configuring ruleset '${ruleset_name}'"
+                if [ -n "${ruleset_id}" ]; then
+                    "${_GH}" api -X PUT "/repos/:owner/:repo/rulesets/${ruleset_id}" \
+                        --input="${filepath}" >/dev/null
+                else
+                    "${_GH}" api -X POST /repos/:owner/:repo/rulesets \
+                        --input="${filepath}" >/dev/null
+                fi
+            done
+        fi
+    fi
 }
 
 app::confirm() {
@@ -223,6 +246,12 @@ app::env_get_to_put() {
     '
 }
 
+# Transform GET /repos/{owner}/{repo}/rulesets/{id} response into the shape
+# accepted by POST/PUT: drops ids, timestamps, links and other read-only fields.
+app::ruleset_get_to_put() {
+    jq '{name, target, enforcement, bypass_actors, conditions, rules} | with_entries(select(.value != null))'
+}
+
 app::init() {
     log "Initializing config..."
 
@@ -279,7 +308,7 @@ app::init() {
     local repo_private
     repo_private=$(printf '%s' "${repo_info}" | jq -r '.private')
     if [ "${repo_private}" = "true" ]; then
-        log:action "warn" "Skipping branch protection: unavailable on private repos"
+        log:action "warn" "Skipping branch protection and rulesets: unavailable on private repos"
     else
         app::init_dir "${APP_CONFIG}/branch-protection"
         local bp_raw
@@ -311,6 +340,20 @@ app::init() {
                 app::init_file "${APP_CONFIG}/environments/${env_name}.json" "${env_json}"
             done < <(printf '%s' "${envs_response}" | jq -r '.environments[].name')
         fi
+    fi
+
+    if [ "${repo_private}" != "true" ]; then
+        local rulesets_list
+        rulesets_list=$("${_GH}" api "/repos/:owner/:repo/rulesets?includes_parents=false" 2>/dev/null) || rulesets_list=""
+        while IFS= read -r ruleset_id; do
+            [ -n "${ruleset_id}" ] || continue
+            local ruleset_raw ruleset_json ruleset_file
+            ruleset_raw=$("${_GH}" api "/repos/:owner/:repo/rulesets/${ruleset_id}")
+            ruleset_json=$(printf '%s' "${ruleset_raw}" | app::ruleset_get_to_put)
+            ruleset_file=$(printf '%s' "${ruleset_json}" | jq -r '.name | gsub("[^A-Za-z0-9._-]"; "-")')
+            app::init_dir "${APP_CONFIG}/rulesets"
+            app::init_file "${APP_CONFIG}/rulesets/${ruleset_file}.json" "${ruleset_json}"
+        done < <(printf '%s' "${rulesets_list}" | jq -r '.[].id // empty')
     fi
 
     log "Done"

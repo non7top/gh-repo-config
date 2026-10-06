@@ -198,7 +198,7 @@ setup_init_mock() {
     assert_output '[true,"MERGE_MESSAGE","PR_TITLE","enabled","disabled"]'
 }
 
-@test "init: private repos skip branch protection" {
+@test "init: private repos skip branch protection and rulesets" {
     local gh private_repo_json
     private_repo_json=$(jq '.private = true' "${TEST_FIXTURES_DIR}/api-responses/repo.json")
 
@@ -210,10 +210,33 @@ setup_init_mock() {
 
     _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
     assert_success
-    assert_line --partial "Skipping branch protection: unavailable on private repos"
+    assert_line --partial "Skipping branch protection and rulesets: unavailable on private repos"
     assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
+    assert_dir_not_exist "${TEST_TEMP_DIR}/rulesets"
 
-    # No protection endpoint was called.
+    # No protection or ruleset endpoint was called.
     run mock_get_call_num "${gh}"
     assert_output "4"
+}
+
+@test "init: should generate rulesets from live API data" {
+    local gh
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/repo.json")" 1
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
+    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/rulesets-list.json")" 6
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/ruleset.json")" 7
+
+    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    assert_success
+
+    # Filename is derived from the ruleset name; the body drops read-only fields.
+    assert_files_equal \
+        "${TEST_TEMP_DIR}/rulesets/require-pr.json" \
+        "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json"
+    assert_regex "$(mock_get_call_args "${gh}" 6)" "rulesets\?includes_parents=false"
+    assert_regex "$(mock_get_call_args "${gh}" 7)" "api /repos/:owner/:repo/rulesets/4242"
 }

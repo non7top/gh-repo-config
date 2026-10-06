@@ -194,11 +194,12 @@ setup() {
     rm -rf "${config_dir}"
 }
 
-@test "apply: private repos skip branch protection" {
+@test "apply: private repos skip branch protection and rulesets" {
     local config_dir
     config_dir="$(mktemp -d)"
-    mkdir -p "${config_dir}/branch-protection"
+    mkdir -p "${config_dir}/branch-protection" "${config_dir}/rulesets"
     cp "${TEST_FIXTURES_DIR}/branch-protection/main.json" "${config_dir}/branch-protection/"
+    cp "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json" "${config_dir}/rulesets/"
 
     gh="$(mock_create)"
     mock_set_output "${gh}" "someuser/somerepo" 1
@@ -207,10 +208,55 @@ setup() {
     _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
     assert_success
     assert_line "[    warn]: Skipping branch protection: unavailable on private repos"
+    assert_line "[    warn]: Skipping rulesets: unavailable on private repos"
 
     # Only the repo view and the repo GET happened.
     run mock_get_call_num "${gh}"
     assert_output "2"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: rulesets are created when no ruleset has the same name" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/rulesets"
+    cp "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json" "${config_dir}/rulesets/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+    mock_set_output "${gh}" '[{"id":1,"name":"other"}]' 3
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_line "[someuser/somerepo]: Configuring ruleset 'require pr'"
+
+    assert_regex "$(mock_get_call_args "${gh}" 3)" "rulesets\?includes_parents=false"
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 4)" \
+        "api -X POST /repos/:owner/:repo/rulesets --input=${config_dir}/rulesets/require-pr.json"
+
+    rm -rf "${config_dir}"
+}
+
+@test "apply: rulesets are updated by id when one with the same name exists" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/rulesets"
+    cp "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json" "${config_dir}/rulesets/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+    mock_set_output "${gh}" '[{"id":4242,"name":"require pr"}]' 3
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 4)" \
+        "api -X PUT /repos/:owner/:repo/rulesets/4242 --input=${config_dir}/rulesets/require-pr.json"
 
     rm -rf "${config_dir}"
 }
