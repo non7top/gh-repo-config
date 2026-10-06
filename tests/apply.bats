@@ -193,3 +193,24 @@ setup() {
 
     rm -rf "${config_dir}"
 }
+
+@test "apply: private repos skip branch protection" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    mkdir -p "${config_dir}/branch-protection"
+    cp "${TEST_FIXTURES_DIR}/branch-protection/main.json" "${config_dir}/branch-protection/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main true" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_line "[    warn]: Skipping branch protection: unavailable on private repos"
+
+    # Only the repo view and the repo GET happened.
+    run mock_get_call_num "${gh}"
+    assert_output "2"
+
+    rm -rf "${config_dir}"
+}

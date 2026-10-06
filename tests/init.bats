@@ -197,3 +197,23 @@ setup_init_mock() {
     run jq -c '[.has_discussions, .merge_commit_title, .merge_commit_message, .security_and_analysis.secret_scanning_push_protection.status, .security_and_analysis.dependabot_security_updates.status]' "${TEST_TEMP_DIR}/repo.json"
     assert_output '[true,"MERGE_MESSAGE","PR_TITLE","enabled","disabled"]'
 }
+
+@test "init: private repos skip branch protection" {
+    local gh private_repo_json
+    private_repo_json=$(jq '.private = true' "${TEST_FIXTURES_DIR}/api-responses/repo.json")
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "${private_repo_json}" 1
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 3
+    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 4
+
+    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    assert_success
+    assert_line --partial "Skipping branch protection: unavailable on private repos"
+    assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
+
+    # No protection endpoint was called.
+    run mock_get_call_num "${gh}"
+    assert_output "4"
+}

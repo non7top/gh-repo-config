@@ -49,8 +49,9 @@ app::apply() {
 
     # Fetch live default branch (used for default_branch change guard and
     # resolving branch-protection/default.json to the actual branch name)
-    local live_default_branch
-    live_default_branch=$("${_GH}" api /repos/:owner/:repo --jq .default_branch)
+    local repo_meta live_default_branch repo_private
+    repo_meta=$("${_GH}" api /repos/:owner/:repo --jq '.default_branch + " " + (.private | tostring)')
+    read -r live_default_branch repo_private <<<"${repo_meta}"
 
     if [ -f "${APP_CONFIG}/repo.json" ]; then
         log:api "${repo}" "Configuring repo"
@@ -84,17 +85,21 @@ app::apply() {
     fi
 
     if [ -d "${APP_CONFIG}/branch-protection" ]; then
-        for filepath in "${APP_CONFIG}/branch-protection/"*.json; do
-            [ -f "${filepath}" ] || continue
-            local branch
-            branch=$(basename "${filepath}" ".json")
-            if [ "${branch}" = "default" ]; then
-                branch="${live_default_branch}"
-            fi
-            log:api "${repo}" "Configuring branch protection rules for '${branch}'"
-            "${_GH}" api -X PUT "/repos/:owner/:repo/branches/${branch}/protection" \
-                --input="${filepath}" >/dev/null
-        done
+        if [ "${repo_private}" = "true" ]; then
+            log:action "warn" "Skipping branch protection: unavailable on private repos"
+        else
+            for filepath in "${APP_CONFIG}/branch-protection/"*.json; do
+                [ -f "${filepath}" ] || continue
+                local branch
+                branch=$(basename "${filepath}" ".json")
+                if [ "${branch}" = "default" ]; then
+                    branch="${live_default_branch}"
+                fi
+                log:api "${repo}" "Configuring branch protection rules for '${branch}'"
+                "${_GH}" api -X PUT "/repos/:owner/:repo/branches/${branch}/protection" \
+                    --input="${filepath}" >/dev/null
+            done
+        fi
     fi
 
     if [ -f "${APP_CONFIG}/labels.json" ]; then
@@ -271,14 +276,20 @@ app::init() {
     # Generate branch-protection/default.json from the live default branch.
     # "default" is a special filename resolved at apply time — it doesn't hardcode
     # the branch name, so it survives branch renames.
-    app::init_dir "${APP_CONFIG}/branch-protection"
-    local bp_raw
-    if bp_raw=$("${_GH}" api "/repos/:owner/:repo/branches/${default_branch}/protection" 2>/dev/null); then
-        local bp_json
-        bp_json=$(printf '%s' "${bp_raw}" | app::bp_get_to_put)
-        app::init_file "${APP_CONFIG}/branch-protection/default.json" "${bp_json}"
+    local repo_private
+    repo_private=$(printf '%s' "${repo_info}" | jq -r '.private')
+    if [ "${repo_private}" = "true" ]; then
+        log:action "warn" "Skipping branch protection: unavailable on private repos"
     else
-        log:action "warn" "No branch protection rules found for '${default_branch}' — skipping"
+        app::init_dir "${APP_CONFIG}/branch-protection"
+        local bp_raw
+        if bp_raw=$("${_GH}" api "/repos/:owner/:repo/branches/${default_branch}/protection" 2>/dev/null); then
+            local bp_json
+            bp_json=$(printf '%s' "${bp_raw}" | app::bp_get_to_put)
+            app::init_file "${APP_CONFIG}/branch-protection/default.json" "${bp_json}"
+        else
+            log:action "warn" "No branch protection rules found for '${default_branch}' — skipping"
+        fi
     fi
 
     # Generate labels.json: one array file, only writable fields
