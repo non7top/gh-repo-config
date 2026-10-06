@@ -35,14 +35,14 @@ config_with() {
 @test "push: calls the API for each section" {
     run ./gh-repo-config push --config "${FULL_CONFIG}"
     assert_success
-    assert_line "[someuser/somerepo]: Configuring repo"
-    assert_line "[someuser/somerepo]: Configuring repo topics"
-    assert_line "[someuser/somerepo]: Configuring branch protection rules for 'main'"
-    assert_line "[someuser/somerepo]: Configuring ruleset 'require pr'"
-    assert_line "[someuser/somerepo]: Configuring labels"
-    assert_line "[someuser/somerepo]: Configuring environment 'production'"
-    assert_line "[someuser/somerepo]: Configuring Actions permissions"
-    assert_line "[someuser/somerepo]: Configuring vulnerability alerts"
+    assert_line "[testowner/gh-repo-config]: Configuring repo"
+    assert_line "[testowner/gh-repo-config]: Configuring repo topics"
+    assert_line "[testowner/gh-repo-config]: Configuring branch protection rules for 'main'"
+    assert_line "[testowner/gh-repo-config]: Configuring ruleset 'require pr'"
+    assert_line "[testowner/gh-repo-config]: Configuring labels"
+    assert_line "[testowner/gh-repo-config]: Configuring environment 'production'"
+    assert_line "[testowner/gh-repo-config]: Configuring Actions permissions"
+    assert_line "[testowner/gh-repo-config]: Configuring vulnerability alerts"
 
     run gh_calls
     assert_line --regexp '^PATCH /repos/:owner/:repo \{.*"allow_squash_merge":true'
@@ -181,8 +181,8 @@ EOF
 
     run ./gh-repo-config push --config "${CONFIG}"
     assert_success
-    assert_line "[someuser/somerepo]: Configuring branch protection rules for '2026_06_05_k8s'"
-    assert_line "[someuser/somerepo]: Configuring branch protection rules for 'release/1'"
+    assert_line "[testowner/gh-repo-config]: Configuring branch protection rules for '2026_06_05_k8s'"
+    assert_line "[testowner/gh-repo-config]: Configuring branch protection rules for 'release/1'"
 
     run gh_calls
     assert_line --regexp '^PUT /repos/:owner/:repo/branches/2026_06_05_k8s/protection '
@@ -209,8 +209,8 @@ EOF
     assert_success
 
     run cat "${BATS_TEST_TMPDIR}/stderr.log"
-    assert_line "[someuser/somerepo]: Configuring repo"
-    assert_line "[someuser/somerepo]: Configuring vulnerability alerts"
+    assert_line "[testowner/gh-repo-config]: Configuring repo"
+    assert_line "[testowner/gh-repo-config]: Configuring vulnerability alerts"
 }
 
 @test "push: --dry-run shows a diff of what would change, with the section in the hunk header" {
@@ -282,4 +282,12 @@ EOF
 
     run gh_calls
     assert_line --regexp '^PUT /repos/:owner/:repo/branches/main/protection '
+}
+
+@test "push: the log names the repo that gh api resolves" {
+    set_api GET /repos/:owner/:repo "$(jq '.full_name = "someone/else"' "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo.json")"
+
+    run ./gh-repo-config push --config "${FULL_CONFIG}" --dry-run
+    assert_success
+    assert_line "[someone/else]: Configuring repo"
 }

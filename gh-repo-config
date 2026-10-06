@@ -566,10 +566,9 @@ app::push() {
     app::require_config
 
     local repo repo_meta live_default_branch repo_private
-    repo=$("${_GH}" repo view --json nameWithOwner --jq .nameWithOwner)
-    # Branch names can't contain spaces, so a space-separated pair is safe.
-    repo_meta=$("${_GH}" api /repos/:owner/:repo --jq '.default_branch + " " + (.private | tostring)')
-    read -r live_default_branch repo_private <<<"${repo_meta}"
+    # The name comes from this call, not `gh repo view`, which ignores GH_REPO. Names have no spaces.
+    repo_meta=$("${_GH}" api /repos/:owner/:repo --jq '.full_name + " " + .default_branch + " " + (.private | tostring)')
+    read -r repo live_default_branch repo_private <<<"${repo_meta}"
 
     # Where ~DEFAULT_BRANCH points once the repo section has been applied.
     local default_after_push="${live_default_branch}" wanted_default_branch

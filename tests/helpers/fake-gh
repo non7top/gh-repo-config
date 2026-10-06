@@ -7,11 +7,6 @@
 # fixture exists (otherwise with nothing).
 set -o nounset -o pipefail
 
-if [ "$1" = "repo" ]; then
-    echo "someuser/somerepo"
-    exit 0
-fi
-
 shift
 method="GET"
 path=""
