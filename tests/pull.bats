@@ -94,7 +94,7 @@ teardown() {
     assert_output "[false,false,false]"
 }
 
-@test "pull: records protection for every protected branch, keyed by branch name" {
+@test "pull: records the default branch's protection as ~DEFAULT_BRANCH and others by name" {
     set_api GET /repos/:owner/:repo/branches '[{"name":"main","protected":true},{"name":"release/1","protected":true},{"name":"dev","protected":false}]'
     cp "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo__branches__main__protection.json" \
         "${FAKE_GH_FIXTURES}/GET__repos__owner__repo__branches__release__1__protection.json"
@@ -102,7 +102,7 @@ teardown() {
     run ./gh-repo-config pull --config "${CONFIG}"
     assert_success
     run jq -c '.branch_protection | keys' "${CONFIG}"
-    assert_output '["main","release/1"]'
+    assert_output '["release/1","~DEFAULT_BRANCH"]'
 }
 
 @test "pull: uses empty sections when a public repo has no protection or rulesets" {
@@ -133,7 +133,7 @@ teardown() {
     assert_output "false"
 }
 
-@test "pull: the repo section carries the actual default branch" {
+@test "pull: the repo section carries the actual default branch, protection does not" {
     set_api GET /repos/:owner/:repo "$(jq '.default_branch = "2026_06_05_k8s"' "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo.json")"
     set_api GET /repos/:owner/:repo/branches '[{"name":"2026_06_05_k8s","protected":true}]'
     cp "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo__branches__main__protection.json" \
@@ -142,7 +142,7 @@ teardown() {
     run ./gh-repo-config pull --config "${CONFIG}"
     assert_success
     run jq -r '.repo.default_branch, (.branch_protection | keys[])' "${CONFIG}"
-    assert_output "2026_06_05_k8s"$'\n'"2026_06_05_k8s"
+    assert_output "2026_06_05_k8s"$'\n'"~DEFAULT_BRANCH"
 }
 
 @test "pull: a label without a description is written with an empty one" {

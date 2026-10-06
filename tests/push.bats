@@ -174,3 +174,32 @@ EOF
     run gh_calls
     assert_output ""
 }
+
+@test "push: ~DEFAULT_BRANCH resolves to the live default branch and other keys stay literal" {
+    set_api GET /repos/:owner/:repo "$(jq '.default_branch = "2026_06_05_k8s"' "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo.json")"
+    jq '{branch_protection: (.branch_protection + {"release/1": .branch_protection["~DEFAULT_BRANCH"]})}' "${FULL_CONFIG}" >"${CONFIG}"
+
+    run ./gh-repo-config push --config "${CONFIG}"
+    assert_success
+    assert_line "[someuser/somerepo]: Configuring branch protection rules for '2026_06_05_k8s'"
+    assert_line "[someuser/somerepo]: Configuring branch protection rules for 'release/1'"
+
+    run gh_calls
+    assert_line --regexp '^PUT /repos/:owner/:repo/branches/2026_06_05_k8s/protection '
+    assert_line --regexp '^PUT /repos/:owner/:repo/branches/release/1/protection '
+    refute_output --partial "~DEFAULT_BRANCH"
+}
+
+@test "push: pull then push sends back exactly what was pulled" {
+    run ./gh-repo-config pull --config "${CONFIG}"
+    assert_success
+
+    run ./gh-repo-config push --config "${CONFIG}"
+    assert_success
+
+    run gh_calls
+    assert_line "PUT /repos/:owner/:repo/branches/main/protection $(jq -c '.branch_protection["~DEFAULT_BRANCH"]' "${CONFIG}")"
+    assert_line "PUT /repos/:owner/:repo/rulesets/4242 $(jq -c '.rulesets[0]' "${CONFIG}")"
+    assert_line "PUT /repos/:owner/:repo/topics $(jq -c '.topics' "${CONFIG}")"
+    assert_line "PUT /repos/:owner/:repo/environments/production $(jq -c '.environments.production' "${CONFIG}")"
+}

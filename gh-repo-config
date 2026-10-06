@@ -323,10 +323,14 @@ app::pull() {
         local branch
         while IFS= read -r branch; do
             [ -n "${branch}" ] || continue
-            local bp_raw
+            local bp_raw bp_key="${branch}"
+            # The default branch is recorded by token, not name, so a rename doesn't stale the file.
+            if [ "${branch}" = "${default_branch}" ]; then
+                bp_key="~DEFAULT_BRANCH"
+            fi
             if bp_raw=$("${_GH}" api "/repos/:owner/:repo/branches/${branch}/protection" 2>/dev/null); then
-                bp_json=$(jq --arg branch "${branch}" --argjson value "$(printf '%s' "${bp_raw}" | app::bp_get_to_put)" \
-                    '.[$branch] = $value' <<<"${bp_json}")
+                bp_json=$(jq --arg key "${bp_key}" --argjson value "$(printf '%s' "${bp_raw}" | app::bp_get_to_put)" \
+                    '.[$key] = $value' <<<"${bp_json}")
             fi
         done < <("${_GH}" api /repos/:owner/:repo/branches --paginate --jq '.[] | select(.protected) | .name')
 
@@ -448,6 +452,7 @@ app::pull() {
 # manages (section present) but does not list.
 app::prune_plan() {
     local -r repo_private="$1"
+    local -r live_default_branch="$2"
 
     if app::has labels; then
         local name
@@ -484,7 +489,9 @@ app::prune_plan() {
     if [ "${repo_private}" != "true" ] && app::has branch_protection; then
         while IFS= read -r name; do
             [ -n "${name}" ] || continue
-            if ! jq -e --arg name "${name}" '.branch_protection | has($name)' "${APP_CONFIG}" >/dev/null; then
+            if ! jq -e --arg name "${name}" --arg default "${live_default_branch}" \
+                '.branch_protection | keys | map(if . == "~DEFAULT_BRANCH" then $default else . end) | index($name) != null' \
+                "${APP_CONFIG}" >/dev/null; then
                 printf '/repos/:owner/:repo/branches/%s/protection\tbranch protection %s\n' "${name}" "${name}"
             fi
         done < <("${_GH}" api /repos/:owner/:repo/branches --paginate --jq '.[] | select(.protected) | .name')
@@ -503,7 +510,7 @@ app::push() {
 
     local plan=""
     if [ "${prune}" = "true" ]; then
-        plan=$(app::prune_plan "${repo_private}")
+        plan=$(app::prune_plan "${repo_private}" "${live_default_branch}")
         if [ -n "${plan}" ]; then
             log "The following live resources are not in ${APP_CONFIG} and will be deleted:"
             while IFS=$'\t' read -r _ description; do
@@ -544,12 +551,16 @@ app::push() {
         if [ "${repo_private}" = "true" ]; then
             log:action "warn" "Skipping branch protection: unavailable on private repos"
         else
-            local branch
-            while IFS= read -r branch; do
-                [ -n "${branch}" ] || continue
+            local key branch
+            while IFS= read -r key; do
+                [ -n "${key}" ] || continue
+                branch="${key}"
+                if [ "${key}" = "~DEFAULT_BRANCH" ]; then
+                    branch="${live_default_branch}"
+                fi
                 log:api "${repo}" "Configuring branch protection rules for '${branch}'"
                 app::write PUT "/repos/:owner/:repo/branches/${branch}/protection" \
-                    "$(jq -c --arg branch "${branch}" '.branch_protection[$branch]' "${APP_CONFIG}")"
+                    "$(jq -c --arg key "${key}" '.branch_protection[$key]' "${APP_CONFIG}")"
             done < <(jq -r '.branch_protection | keys[]' "${APP_CONFIG}")
         fi
     fi
