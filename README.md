@@ -16,13 +16,14 @@
 
 ## Usage
 
-Navigate to the repo you would like to configure and run:
+Navigate to the repo you would like to configure and run either:
 
 ```sh
-gh repo-config pull
+gh repo-config init   # a starter file with the built-in defaults
+gh repo-config pull   # the repo's live settings
 ```
 
-This writes the repo's live settings to `.github/repo-config.json`. Edit it, then apply it:
+Both write `.github/repo-config.json`. Edit it, then apply it:
 
 ```sh
 gh repo-config push
@@ -30,6 +31,7 @@ gh repo-config push
 
 | Command | What it does |
 | --- | --- |
+| `init` | Writes the built-in defaults to a new config file. Refuses to overwrite one. |
 | `pull` | Live settings → config file. Shows a diff and asks before overwriting. |
 | `push` | Config file → live settings. Sections missing from the file are left alone. |
 | `sync` | Like `push`, but also deletes labels, rulesets, environments and branch protection that the file does not list. Asks first. |
@@ -60,6 +62,10 @@ Where the API has nothing usable, the file differs from it:
 - `pull` only records branch protection for branches that are currently protected.
 
 JSON has no comments, so every section can have an `x-comment-<section>` sibling (for example `x-comment-repo`). They are never sent to the API, and `pull` keeps the ones you wrote. A section without one gets a link to its API docs. The diff `pull` shows names the changed section's comment in each hunk header.
+
+### Defaults
+
+`init` writes only settings that are the same across the maintainer's own repos: all merge methods allowed, no auto-merge, secret scanning with push protection, a `default` ruleset on the default branch (PR required with no approvals, no deletion, no force-push), a read-only workflow token, and Actions allowed to create and approve PRs. Anything that varies per repo (description, wiki, branch cleanup, labels, topics) is left out, so it stays unmanaged. Rulesets are left out for private repos.
 
 An editor schema with a description per section is in [`repo-config.schema.json`](./repo-config.schema.json).
 
