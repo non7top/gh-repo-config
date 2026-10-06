@@ -99,12 +99,14 @@ app::help() {
     echo "  gh repo-config <command> [<flags>]"
     echo ""
     echo "Commands:"
+    echo "  init:       Write a starter config file with the built-in defaults"
     echo "  pull:       Write the repo's live settings to the config file"
     echo "  push:       Apply the config file to the repo"
     echo "  sync:       Like push, but also delete labels, rulesets, environments and"
     echo "              branch protection that are not in the config file"
     echo ""
     echo "Examples:"
+    echo "  $ gh repo-config init"
     echo "  $ gh repo-config pull"
     echo "  $ gh repo-config push --dry-run"
     echo "  $ gh repo-config sync"
@@ -212,6 +214,89 @@ app::repo_get_to_patch() {
         squash_merge_commit_title,
         web_commit_signoff_required
     } | with_entries(select(.value != null))'
+}
+
+# Starter config: only settings that are the same across the maintainer's repos.
+# Anything that varies per repo (description, wiki, branch cleanup, labels, ...) is left out so it stays unmanaged.
+app::defaults() {
+    cat <<'EOL'
+{
+  "x-comment-repo": "All merge methods allowed, no auto-merge, secret scanning with push protection. https://docs.github.com/en/rest/repos/repos#update-a-repository",
+  "repo": {
+    "allow_auto_merge": false,
+    "allow_merge_commit": true,
+    "allow_rebase_merge": true,
+    "allow_squash_merge": true,
+    "allow_update_branch": false,
+    "has_discussions": false,
+    "has_issues": true,
+    "has_projects": true,
+    "merge_commit_message": "PR_TITLE",
+    "merge_commit_title": "MERGE_MESSAGE",
+    "security_and_analysis": {
+      "secret_scanning": {"status": "enabled"},
+      "secret_scanning_push_protection": {"status": "enabled"}
+    },
+    "squash_merge_commit_message": "COMMIT_MESSAGES",
+    "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+    "web_commit_signoff_required": false
+  },
+  "x-comment-rulesets": "Changes to the default branch need a PR (no approvals required); no deletion or force-push. https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset",
+  "rulesets": [
+    {
+      "name": "default",
+      "target": "branch",
+      "enforcement": "active",
+      "bypass_actors": [],
+      "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+      "rules": [
+        {"type": "deletion"},
+        {"type": "non_fast_forward"},
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews_on_push": false,
+            "require_code_owner_review": false,
+            "require_last_push_approval": false,
+            "required_review_thread_resolution": false,
+            "allowed_merge_methods": ["merge", "squash", "rebase"]
+          }
+        }
+      ]
+    }
+  ],
+  "x-comment-actions": "Read-only token by default; Actions may create and approve PRs (release-please needs this). https://docs.github.com/en/rest/actions/permissions",
+  "actions": {
+    "permissions": {"enabled": true, "allowed_actions": "all"},
+    "workflow": {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": true}
+  }
+}
+EOL
+}
+
+app::init() {
+    if [ -f "${APP_CONFIG}" ]; then
+        log "Error: '${APP_CONFIG}' already exists. Edit it, or run '${APP_NAME} pull' to refresh it."
+        exit 1
+    fi
+
+    local doc repo_private
+    doc=$(app::defaults)
+    repo_private=$("${_GH}" api /repos/:owner/:repo --jq .private)
+    if [ "${repo_private}" = "true" ]; then
+        log:action "warn" "Leaving out rulesets: unavailable on private repos"
+        doc=$(jq 'del(.rulesets, ."x-comment-rulesets")' <<<"${doc}")
+    fi
+
+    if [ "${APP_DRY_RUN}" = "true" ]; then
+        log:action "dry-run" "would create ${APP_CONFIG}"
+        return 0
+    fi
+    log:action "create" "${APP_CONFIG}"
+    mkdir -p "$(dirname "${APP_CONFIG}")"
+    printf '%s\n' "${doc}" >"${APP_CONFIG}"
+    log "Done"
 }
 
 app::pull() {
@@ -560,7 +645,7 @@ app::version() {
 app::parseargs() {
     while test $# -gt 0; do
         case "${1}" in
-        pull | push | sync | help | version)
+        init | pull | push | sync | help | version)
             APP_CMD="${1}"
             shift
             ;;
@@ -598,6 +683,7 @@ app::parseargs() {
 
 app::dispatch() {
     case "${1}" in
+    init) app::init ;;
     pull) app::pull ;;
     push) app::push ;;
     sync) app::sync ;;
