@@ -5,278 +5,88 @@ setup() {
     load "../vendor/bats-support/load"
     load "../vendor/bats-assert/load"
     load "../vendor/bats-file/load"
-    load "../vendor/bats-mock/load"
-
-    TEST_TEMP_DIR="$(temp_make)"
-    # Transform tempdir paths in the test output to make it easier to read
-    # See: https://github.com/ztombol/bats-file#transforming-displayed-paths
-    export BATSLIB_FILE_PATH_REM="#${TEST_TEMP_DIR}"
-    export BATSLIB_FILE_PATH_ADD="<temp>"
-
-    TEST_FIXTURES_DIR="$(dirname "$BATS_TEST_FILENAME")/fixtures"
+    load "helpers/common"
+    setup_fake_gh
+    CONFIG="${BATS_TEST_TMPDIR}/.github/repo-config.json"
 }
 
 teardown() {
-    temp_del "$TEST_TEMP_DIR"
+    teardown_fake_gh
 }
 
-# Create a gh mock pre-loaded with standard API responses for the 5 init calls:
-#   1: GET /repos/:owner/:repo
-#   2: GET /repos/:owner/:repo/topics
-#   3: GET /repos/:owner/:repo/branches/{default_branch}/protection
-#   4: GET /repos/:owner/:repo/labels (--paginate)
-#   5: GET /repos/:owner/:repo/environments
-setup_init_mock() {
-    local gh
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/repo.json")" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
-    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
-    printf '%s' "${gh}"
-}
-
-@test "init: should create intermediate dirs if needed" {
-    local gh
-    gh="$(setup_init_mock)"
-    mkdir "${TEST_TEMP_DIR}/foo"
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}/foo/bar/baz"
+@test "init: writes the defaults, creating intermediate dirs" {
+    run ./gh-repo-config init --config "${CONFIG}"
     assert_success
-    assert_dir_exists "${TEST_TEMP_DIR}/foo/bar/baz"
+    assert_file_exist "${CONFIG}"
+
+    run jq -c '[.repo.allow_merge_commit, .rulesets[0].name, .actions.workflow.can_approve_pull_request_reviews]' "${CONFIG}"
+    assert_output '[true,"default",true]'
 }
 
-@test "init: should generate files from live API data" {
-    local gh
-    gh="$(setup_init_mock)"
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+@test "init: the default ruleset targets the default branch whatever its name" {
+    run ./gh-repo-config init --config "${CONFIG}"
     assert_success
 
-    assert_file_exist "${TEST_TEMP_DIR}/repo.json"
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/repo.json" \
-        "${TEST_FIXTURES_DIR}/expected/repo.json"
-
-    assert_file_exist "${TEST_TEMP_DIR}/topics.json"
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/topics.json" \
-        "${TEST_FIXTURES_DIR}/expected/topics.json"
-
-    # Must use the live default branch name as the source for branch protection,
-    # and write it under the special "default" filename (not the literal branch name).
-    assert_file_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/branch-protection/default.json" \
-        "${TEST_FIXTURES_DIR}/expected/branch-protection/default.json"
-
-    assert_file_exist "${TEST_TEMP_DIR}/labels.json"
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/labels.json" \
-        "${TEST_FIXTURES_DIR}/expected/labels.json"
+    run jq -c '.rulesets[0] | [.conditions.ref_name.include, [.rules[].type]]' "${CONFIG}"
+    assert_output '[["~DEFAULT_BRANCH"],["deletion","non_fast_forward","pull_request"]]'
 }
 
-@test "init: should generate environments from live API data" {
-    local gh
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/repo.json")" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/environments.json")" 5
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+@test "init: leaves out settings that differ between repos" {
+    run ./gh-repo-config init --config "${CONFIG}"
     assert_success
 
-    assert_file_exist "${TEST_TEMP_DIR}/environments/production.json"
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/environments/production.json" \
-        "${TEST_FIXTURES_DIR}/expected/environments/production.json"
+    run jq -c '[.repo | has("description"), has("homepage"), has("default_branch"), has("has_wiki"), has("delete_branch_on_merge")]' "${CONFIG}"
+    assert_output "[false,false,false,false,false]"
+    run jq -c '[has("topics"), has("labels"), has("environments"), has("branch_protection"), has("vulnerability_alerts")]' "${CONFIG}"
+    assert_output "[false,false,false,false,false]"
 }
 
-@test "init: repo.json contains the actual default branch from the API" {
-    local gh
-    # Return a repo where default_branch is NOT main
-    local custom_repo_json
-    custom_repo_json=$(jq '.default_branch = "2026_06_05_k8s"' \
-        "${TEST_FIXTURES_DIR}/api-responses/repo.json")
-
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "${custom_repo_json}" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
-    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+@test "init: every section has an x-comment" {
+    run ./gh-repo-config init --config "${CONFIG}"
     assert_success
 
-    # repo.json must reflect the real default branch, not a hardcoded "main"
-    run jq -r '.default_branch' "${TEST_TEMP_DIR}/repo.json"
-    assert_output "2026_06_05_k8s"
-
-    # branch-protection file must always be named "default", not the branch name
-    assert_file_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
-    assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/2026_06_05_k8s.json"
-    assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/main.json"
+    run jq -r '. as $d | [keys[] | select(startswith("x-comment-") | not)] | map(select($d["x-comment-" + .] == null)) | length' "${CONFIG}"
+    assert_output "0"
 }
 
-@test "init: should prompt if repo.json already exists" {
-    local gh
-    gh="$(setup_init_mock)"
-    echo "EXISTING" >"${TEST_TEMP_DIR}/repo.json"
+@test "init: leaves out rulesets for private repos" {
+    set_api GET /repos/:owner/:repo "$(jq '.private = true' "${TEST_FIXTURES_DIR}/gh/GET__repos__owner__repo.json")"
 
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}" <<<"N"
-
-    assert_line "[    warn]: ${TEST_TEMP_DIR}/repo.json already exists!"
-    assert_line "[    keep]: ${TEST_TEMP_DIR}/repo.json"
-    assert_file_contains "${TEST_TEMP_DIR}/repo.json" "EXISTING"
-}
-
-@test "init: should prompt if topics.json already exists" {
-    local gh
-    gh="$(setup_init_mock)"
-    echo "EXISTING" >"${TEST_TEMP_DIR}/topics.json"
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}" <<<"N"
-
-    assert_line "[    warn]: ${TEST_TEMP_DIR}/topics.json already exists!"
-    assert_line "[    keep]: ${TEST_TEMP_DIR}/topics.json"
-    assert_file_contains "${TEST_TEMP_DIR}/topics.json" "EXISTING"
-}
-
-@test "init: should prompt if branch-protection/default.json already exists" {
-    local gh
-    gh="$(setup_init_mock)"
-    mkdir -p "${TEST_TEMP_DIR}/branch-protection"
-    echo "EXISTING" >"${TEST_TEMP_DIR}/branch-protection/default.json"
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}" <<<"N"
-
-    assert_line "[    warn]: ${TEST_TEMP_DIR}/branch-protection/default.json already exists!"
-    assert_line "[    keep]: ${TEST_TEMP_DIR}/branch-protection/default.json"
-    assert_file_contains "${TEST_TEMP_DIR}/branch-protection/default.json" "EXISTING"
-}
-
-@test "init: should skip branch protection when none configured" {
-    local gh
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/repo.json")" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    # Call 3 (branch protection) returns non-zero to simulate 404
-    mock_set_status "${gh}" 1 3
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
-    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    run ./gh-repo-config init --config "${CONFIG}"
     assert_success
-    assert_line --partial "No branch protection rules found for 'main'"
-    assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
+    assert_line "[    warn]: Leaving out rulesets: unavailable on private repos"
+    run jq -c '[has("rulesets"), has("x-comment-rulesets")]' "${CONFIG}"
+    assert_output "[false,false]"
 }
 
-@test "init: repo.json carries extended security_and_analysis and merge commit fields" {
-    local gh extended
-    extended=$(jq '
-        .has_discussions = true
-        | .merge_commit_title = "MERGE_MESSAGE"
-        | .merge_commit_message = "PR_TITLE"
-        | .security_and_analysis += {
-            "secret_scanning_push_protection": {"status": "enabled"},
-            "dependabot_security_updates": {"status": "disabled"}
-        }' "${TEST_FIXTURES_DIR}/api-responses/repo.json")
+@test "init: refuses to overwrite an existing file" {
+    mkdir -p "$(dirname "${CONFIG}")"
+    echo '{"mine": true}' >"${CONFIG}"
 
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "${extended}" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
-    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
+    run ./gh-repo-config init --config "${CONFIG}"
+    assert_failure
+    assert_line --partial "already exists"
+    run jq -r '.mine' "${CONFIG}"
+    assert_output "true"
+}
 
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+@test "init: --dry-run does not write the file" {
+    run ./gh-repo-config init --config "${CONFIG}" --dry-run
+    assert_success
+    assert_line --partial "would create ${CONFIG}"
+    assert_file_not_exist "${CONFIG}"
+}
+
+@test "init: the generated file can be pushed" {
+    run ./gh-repo-config init --config "${CONFIG}"
     assert_success
 
-    run jq -c '[.has_discussions, .merge_commit_title, .merge_commit_message, .security_and_analysis.secret_scanning_push_protection.status, .security_and_analysis.dependabot_security_updates.status]' "${TEST_TEMP_DIR}/repo.json"
-    assert_output '[true,"MERGE_MESSAGE","PR_TITLE","enabled","disabled"]'
-}
-
-@test "init: private repos skip branch protection and rulesets" {
-    local gh private_repo_json
-    private_repo_json=$(jq '.private = true' "${TEST_FIXTURES_DIR}/api-responses/repo.json")
-
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "${private_repo_json}" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 3
-    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 4
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
-    assert_success
-    assert_line --partial "Skipping branch protection and rulesets: unavailable on private repos"
-    assert_file_not_exist "${TEST_TEMP_DIR}/branch-protection/default.json"
-    assert_dir_not_exist "${TEST_TEMP_DIR}/rulesets"
-
-    # No protection or ruleset endpoint was called.
-    run mock_get_call_num "${gh}"
-    assert_output "7"
-}
-
-@test "init: should generate rulesets from live API data" {
-    local gh
-    gh="$(mock_create)"
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/repo.json")" 1
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/topics.json")" 2
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/branch-protection.json")" 3
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/labels.json")" 4
-    mock_set_output "${gh}" '{"total_count":0,"environments":[]}' 5
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/rulesets-list.json")" 6
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/ruleset.json")" 7
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    run ./gh-repo-config push --config "${CONFIG}"
     assert_success
 
-    # Filename is derived from the ruleset name; the body drops read-only fields.
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/rulesets/require-pr.json" \
-        "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json"
-    assert_regex "$(mock_get_call_args "${gh}" 6)" "rulesets\?includes_parents=false"
-    assert_regex "$(mock_get_call_args "${gh}" 7)" "api /repos/:owner/:repo/rulesets/4242"
-}
-
-@test "init: should generate actions.json from live API data" {
-    local gh
-    gh="$(setup_init_mock)"
-    # Calls 6-7: rulesets list (empty), then Actions permissions and workflow permissions
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/actions-permissions.json")" 7
-    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/actions-workflow.json")" 8
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
-    assert_success
-
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/actions.json" \
-        "${TEST_FIXTURES_DIR}/expected/actions.json"
-}
-
-@test "init: should generate security.json from live API data" {
-    local gh
-    gh="$(setup_init_mock)"
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
-    assert_success
-
-    assert_files_equal \
-        "${TEST_TEMP_DIR}/security.json" \
-        "${TEST_FIXTURES_DIR}/expected/security.json"
-}
-
-@test "init: vulnerability alerts are recorded as false when the endpoint fails" {
-    local gh
-    gh="$(setup_init_mock)"
-    # Calls 6-8: rulesets list, actions permissions, actions workflow. Call 9: vulnerability alerts.
-    mock_set_status "${gh}" 1 9
-
-    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
-    assert_success
-
-    run jq -r '.vulnerability_alerts' "${TEST_TEMP_DIR}/security.json"
-    assert_output "false"
+    run gh_calls
+    assert_line --regexp '^PATCH /repos/:owner/:repo \{"allow_auto_merge":false'
+    assert_line --regexp '^POST /repos/:owner/:repo/rulesets \{"name":"default"'
+    assert_line 'PUT /repos/:owner/:repo/actions/permissions/workflow {"default_workflow_permissions":"read","can_approve_pull_request_reviews":true}'
+    refute_output --partial "x-comment"
 }

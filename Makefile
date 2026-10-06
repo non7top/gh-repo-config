@@ -4,20 +4,6 @@ SHELL := /bin/bash
 
 ##@ App
 
-.PHONY: fixtures
-fixtures: ## Recreate test fixtures
-	rm -Rf ./tests/fixtures
-	./gh-repo-config init --config ./tests/fixtures
-	cp ./tests/fixtures/branch-protection/main.json ./tests/fixtures/branch-protection/prod.json
-
-.PHONY: format
-format: ## Format source code
-	@echo "TODO..."
-
-.PHONY: lint
-lint: ## Lint source code
-	@echo "TODO..."
-
 .PHONY: test
 test: export APP_ENV := test
 test: ## Test the extension

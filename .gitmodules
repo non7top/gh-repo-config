@@ -10,6 +10,3 @@
 [submodule "vendor/bats-file"]
 	path = vendor/bats-file
 	url = https://github.com/bats-core/bats-file.git
-[submodule "vendor/bats-mock"]
-	path = vendor/bats-mock
-	url = https://github.com/grayhemp/bats-mock.git
