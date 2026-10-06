@@ -38,6 +38,8 @@ gh repo-config push
 
 Flags: `--config <file>`, `--dry-run` (print changes instead of making them), `--yes` (skip prompts), `--allow-default-branch-change`.
 
+`push --dry-run` and `sync --dry-run` print a unified diff of the live settings against the file, with each hunk headed by its section, then the API calls they would make. Fields the file leaves out are not part of the diff, and `push` shows no deletions (`sync` does). "No changes" means the repo matches the file, so a dry-run doubles as a drift check.
+
 ### Config file
 
 Each section is the request body of one GitHub API endpoint, using the API's own field names, so the GitHub docs describe it:
