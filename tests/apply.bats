@@ -260,3 +260,26 @@ setup() {
 
     rm -rf "${config_dir}"
 }
+
+@test "apply: actions.json sets allowed actions and workflow permissions" {
+    local config_dir
+    config_dir="$(mktemp -d)"
+    cp "${TEST_FIXTURES_DIR}/expected/actions.json" "${config_dir}/"
+
+    gh="$(mock_create)"
+    mock_set_output "${gh}" "someuser/somerepo" 1
+    mock_set_output "${gh}" "main false" 2
+
+    _GH="${gh}" run ./gh-repo-config apply --config "${config_dir}"
+    assert_success
+    assert_line "[someuser/somerepo]: Configuring Actions permissions"
+
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 3)" \
+        "api -X PUT /repos/:owner/:repo/actions/permissions --input=-"
+    assert_regex \
+        "$(mock_get_call_args "${gh}" 4)" \
+        "api -X PUT /repos/:owner/:repo/actions/permissions/workflow --input=-"
+
+    rm -rf "${config_dir}"
+}

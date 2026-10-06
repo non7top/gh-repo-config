@@ -216,7 +216,7 @@ setup_init_mock() {
 
     # No protection or ruleset endpoint was called.
     run mock_get_call_num "${gh}"
-    assert_output "4"
+    assert_output "6"
 }
 
 @test "init: should generate rulesets from live API data" {
@@ -239,4 +239,19 @@ setup_init_mock() {
         "${TEST_FIXTURES_DIR}/expected/rulesets/require-pr.json"
     assert_regex "$(mock_get_call_args "${gh}" 6)" "rulesets\?includes_parents=false"
     assert_regex "$(mock_get_call_args "${gh}" 7)" "api /repos/:owner/:repo/rulesets/4242"
+}
+
+@test "init: should generate actions.json from live API data" {
+    local gh
+    gh="$(setup_init_mock)"
+    # Calls 6-7: rulesets list (empty), then Actions permissions and workflow permissions
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/actions-permissions.json")" 7
+    mock_set_output "${gh}" "$(cat "${TEST_FIXTURES_DIR}/api-responses/actions-workflow.json")" 8
+
+    _GH="${gh}" run ./gh-repo-config init --config "${TEST_TEMP_DIR}"
+    assert_success
+
+    assert_files_equal \
+        "${TEST_TEMP_DIR}/actions.json" \
+        "${TEST_FIXTURES_DIR}/expected/actions.json"
 }

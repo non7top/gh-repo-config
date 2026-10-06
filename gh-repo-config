@@ -154,6 +154,18 @@ app::apply() {
             done
         fi
     fi
+
+    if [ -f "${APP_CONFIG}/actions.json" ]; then
+        log:api "${repo}" "Configuring Actions permissions"
+        if jq -e '.permissions' "${APP_CONFIG}/actions.json" >/dev/null; then
+            jq -c '.permissions' "${APP_CONFIG}/actions.json" | \
+                "${_GH}" api -X PUT /repos/:owner/:repo/actions/permissions --input=- >/dev/null
+        fi
+        if jq -e '.workflow' "${APP_CONFIG}/actions.json" >/dev/null; then
+            jq -c '.workflow' "${APP_CONFIG}/actions.json" | \
+                "${_GH}" api -X PUT /repos/:owner/:repo/actions/permissions/workflow --input=- >/dev/null
+        fi
+    fi
 }
 
 app::confirm() {
@@ -354,6 +366,22 @@ app::init() {
             app::init_dir "${APP_CONFIG}/rulesets"
             app::init_file "${APP_CONFIG}/rulesets/${ruleset_file}.json" "${ruleset_json}"
         done < <(printf '%s' "${rulesets_list}" | jq -r '.[].id // empty')
+    fi
+
+    # Generate actions.json: workflow token defaults and allowed actions
+    local actions_perm actions_workflow
+    actions_perm=$("${_GH}" api /repos/:owner/:repo/actions/permissions 2>/dev/null) || actions_perm=""
+    actions_workflow=$("${_GH}" api /repos/:owner/:repo/actions/permissions/workflow 2>/dev/null) || actions_workflow=""
+    if [ -n "${actions_perm}" ] && [ -n "${actions_workflow}" ]; then
+        local actions_json
+        actions_json=$(jq -n --argjson perm "${actions_perm}" --argjson wf "${actions_workflow}" '{
+            permissions: {enabled: $perm.enabled, allowed_actions: $perm.allowed_actions},
+            workflow: {
+                default_workflow_permissions: $wf.default_workflow_permissions,
+                can_approve_pull_request_reviews: $wf.can_approve_pull_request_reviews
+            }
+        } | del(..|nulls)')
+        app::init_file "${APP_CONFIG}/actions.json" "${actions_json}"
     fi
 
     log "Done"
